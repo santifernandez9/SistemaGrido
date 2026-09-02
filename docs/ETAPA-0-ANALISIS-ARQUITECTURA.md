@@ -1,7 +1,9 @@
 # ETAPA 0 — Análisis, Arquitectura y Plan Maestro
 ### Sistema de Control de Stock, Caja y Rentabilidad para Heladerías Grido (Heladerías Habash)
 
-Versión: 1.0 · Fecha: 2026-09-02 · Autor: Claude (arquitecto de software, a pedido del socio programador)
+Versión: 1.1 (corregida en Etapa 0.1) · Fecha original: 2026-09-02 · Autor: Claude (arquitecto de software, a pedido del socio programador)
+
+> **Nota de versión**: este documento fue corregido puntualmente en la Etapa 0.1 a partir de una revisión crítica del cliente. El detalle completo de qué cambió, por qué, y qué supuestos se eliminaron está en `docs/ETAPA-0.1-CORRECCIONES.md`. Esta versión (1.1) reemplaza a la 1.0 como documento vigente; no se reescribió nada que no estuviera directamente señalado por la corrección.
 
 > **Alcance de este documento**: análisis integral, arquitectura propuesta, modelo de datos, estrategia técnica y plan de implementación por etapas. **No contiene código, migraciones definitivas ni implementación.** Todo lo aquí escrito se deriva del material entregado por el cliente (ZIP `sistema_grido.zip`) y está clasificado explícitamente según su origen (confirmado, evidencia del sistema actual, recomendación, supuesto, pendiente o futuro), tal como exige el encargo.
 
@@ -36,7 +38,7 @@ El cliente (Nabil Habash, franquiciado Grido) necesita reemplazar una operación
 
 El material entregado es inusualmente completo para una Etapa 0: no sólo hay un documento de requisitos ya estructurado, sino un **sistema previo funcional completo** (backend + frontend) que ya resuelve, con distinto grado de madurez, buena parte del núcleo pedido (ledger de movimientos, importación de ventas con detección de duplicados por hash, BOM con descuento automático de insumos, mermas con foto, bajas de lata, caja semanal con parseo de Mercado Pago, auditoría, backups, chequeos de integridad). Este prototipo **no se voltea ni se ignora**: se trata como el mejor punto de partida disponible para validar reglas de negocio y como fuente de datos de referencia (catálogo semilla de ~160 productos, mapeos de alias ya cargados, 181 líneas de BOM ya relevadas). Al mismo tiempo, tiene limitaciones estructurales serias para escalar a Hito 2 (autenticación por PIN compartido sin identidad individual, ausencia de `organization_id`, ausencia de transacciones atómicas reales, Google Sheets como motor de datos) que **no deben heredarse**.
 
-**Veredicto de esta etapa: B — Listo para comenzar parcialmente, con un pendiente no bloqueante que sí condiciona el diseño de Auth (Etapa 1)** — ver sección 27.
+**Veredicto de esta etapa: B — Listo para comenzar parcialmente, con una decisión BLOQUEANTE para el inicio de Etapa 1 (P-001, modelo real de identidad/acceso — sección 22) que el cliente debe resolver antes de que arranque el desarrollo, aunque no bloquea la aprobación de este informe** — ver sección 27.
 
 ---
 
@@ -60,7 +62,7 @@ El material entregado es inusualmente completo para una Etapa 0: no sólo hay un
 | 14 | `infpedidos.png` | Captura del ERP nativo de Grido | Pantalla real "Informe de Pedidos" con los mismos filtros/columnas que `infcomandas.xls`. |
 | 15 | `mix desagrupado.png` / `mixde ventas img.png` | Capturas del ERP nativo de Grido | Pantalla real "Mix de Ventas" en modo Agrupado/Desagrupado — confirma visualmente el origen y el modo de exportación de `mixventas.xls` / `mixventas desa.xls`. |
 
-**Nota de auditoría de datos**: en `PARAMETROS` (hoja del sistema actual) hay valores de PIN en texto plano y sus hashes v2 preparados-pero-no-activados. Este informe no reproduce esos valores; se los menciona sólo como evidencia del **mecanismo** de autenticación actual (PIN de 4 dígitos por rol/ubicación), relevante para la sección 14 (Seguridad).
+**Nota de auditoría de datos**: en `PARAMETROS` (hoja del sistema actual) hay valores de PIN en texto plano y sus hashes v2 preparados-pero-no-activados. Este informe no reproduce esos valores; se los menciona sólo como evidencia del **mecanismo** de autenticación actual (PIN de 4 dígitos por rol/ubicación), relevante para la sección 18 (Seguridad).
 
 ---
 
@@ -92,7 +94,8 @@ Prioridad: **P1** = núcleo Hito 1 (obligatorio antes de noviembre 2026), **P2**
 | RF-005 | Conversión automática entre presentaciones (ej. 2 cajas + 5 unidades → 21 unidades); el usuario nunca multiplica a mano | Doc §9 | Empleada, Encargado depósito | `product_uom`, `product_uom_conversion` | RN-006 | RF-002 | P1 | CONFIRMADO |
 | RF-006 | Depósito cuenta en packs + cajas sueltas; heladería cuenta en cajas + unidades sueltas (unidades de conteo distintas por tipo de ubicación) | Doc, tabla §9 | Encargado depósito, Empleada | `location`, `product_uom` | RN-006 | RF-005 | P1 | CONFIRMADO |
 | RF-007 | Receta/BOM por producto (packaging, insumos) cuando corresponda | Doc §7, §18 | Admin | `bom`, `bom_line` | RN-020..RN-024 | RF-001 | P1 | CONFIRMADO |
-| RF-008 | Importar catálogo maestro de Grido (export real de 106 columnas) y sugerir automáticamente equivalencias/BOM por coincidencia de nombre | Evidencia: `lisarticulos.xls` real + función `leerCatalogoGrido`/`calcularMatchCatalogo`/`generarBomDesdeCatalogo` en el sistema actual | Admin | `product`, `bom` | RN-005, RN-021 | RF-001, RF-004, RF-007 | P2 (recomendado adoptar el mecanismo ya construido) | EXISTENTE EN SISTEMA ACTUAL — no pedido explícitamente por el documento, pero es una herramienta ya construida y usable |
+
+> **RF-008 — retirado en Etapa 0.1 (ver `docs/ETAPA-0.1-CORRECCIONES.md`)**: la versión 1.0 de este informe listaba aquí "importar catálogo maestro de Grido y sugerir automáticamente equivalencias/BOM" como un RF con prioridad propia. Es una corrección de alcance: la **necesidad confirmada** por el cliente es únicamente (a) tener un catálogo utilizable — ya cubierto por RF-001 a RF-007 — y (b) relacionar ventas con su consumo de insumos cuando corresponda — ya cubierto por RF-033 a RF-035. **Construir ese catálogo importando automáticamente el archivo de Grido, y generar el BOM de forma asistida por coincidencia de nombre, es un mecanismo técnico posible (existe evidencia de que ya se construyó en el prototipo actual), no un requisito pedido por el cliente.** Se reclasificó como recomendación **R-002** (sección 20) — el catálogo y el BOM del Hito 1 pueden poblarse íntegramente a mano si el cliente no aprueba automatizarlo.
 
 ### 4.2 Stock: ledger, conteo, teórico/real, diferencias, ajustes
 
@@ -116,8 +119,10 @@ Prioridad: **P1** = núcleo Hito 1 (obligatorio antes de noviembre 2026), **P2**
 |---|---|---|---|---|---|---|---|---|
 | RF-020 | Conteo por sabor: latas cerradas, latas abiertas, fracción estimada (llena, 3/4, 1/2, 1/4, casi vacía) | Doc §17.1 | Empleada | `stock_count_line` (campos específicos de granel) | RN-025, RN-026 | RF-012 | P1 | CONFIRMADO |
 | RF-021 | Baja normal de lata en un toque: sabor → "Dar de baja lata"; registra usuario, local, fecha y hora | Doc §17.2 — "pantalla de mayor prioridad de validación" | Empleada | `inventory_movement` (ICE_CREAM_CONTAINER_CLOSE) | RN-027 | RF-020 | P1 | CONFIRMADO |
-| RF-022 | Deshacer baja de lata sólo el mismo día (excepto Admin) | Evidencia: `deshacerBajaLata_` en sistema actual — comportamiento no mencionado explícitamente en el documento pero coherente con RN-009 (no borrar sin rastro) | Empleada, Admin | `inventory_movement` (anulación) | RN-009, RN-027 | RF-021 | P1 | EXISTENTE EN SISTEMA ACTUAL, coherente con reglas confirmadas — se adopta como regla salvo objeción del cliente |
+| RF-022 | Corregir/deshacer una baja de lata ya registrada, mediante el mecanismo general de reversión de un movimiento (sección 11.4) | Evidencia: `deshacerBajaLata_` en sistema actual aplica un límite concreto ("mismo día, excepto Admin") | Empleada, Encargado depósito, Admin (alcance exacto pendiente) | `inventory_movement` (reversión) | RN-009 | RF-021 | P1 | **EXISTENTE EN SISTEMA ACTUAL / PENDIENTE DE CONFIRMACIÓN (ver P-009)** — el límite de "mismo día, excepto Admin" es comportamiento heredado del prototipo, no un requisito confirmado por el cliente. No se implementa ninguna restricción temporal ni de rol hasta que el cliente confirme qué correcciones necesita permitir realmente. |
 | RF-023 | Consumo semanal por sabor = stock inicial + ingresos − stock final − mermas/ajustes; alimenta la futura proyección de compra anual para Grido | Doc §17.4, §0.5 | Sistema | Vista agregada sobre `inventory_movement` | RN-028 | RF-020, RF-015 | P1 (captura) / P3 (proyección) | CONFIRMADO |
+
+**Nota sobre pesajes**: el sistema actual tiene un módulo separado de "pesaje" (`Pesajes.gs`) que registra el **peso real en kg** de latas abiertas, pesadas con balanza. El documento de requisitos del cliente (§17.1) reemplaza ese enfoque por **fracción estimada a ojo** (llena, 3/4, 1/2, 1/4, casi vacía) dentro del propio conteo — no pide pesaje real. Por lo tanto, "pesaje con balanza" **no se incorpora como requisito** del Hito 1: es EXISTENTE EN SISTEMA ACTUAL pero explícitamente reemplazado, no heredado, por la regla confirmada en RF-020/RN-025.
 
 ### 4.4 Mermas y gasto variable
 
@@ -135,7 +140,7 @@ Prioridad: **P1** = núcleo Hito 1 (obligatorio antes de noviembre 2026), **P2**
 | RF-028 | El Admin debe exportar el reporte en modo **"Desagrupado"** para que las líneas de Canje/promoción queden separadas de la venta base | Evidencia visual: capturas `mix desagrupado.png` vs `mixde ventas img.png` muestran el mismo período con selector "Precios: Agrupados/Desagrupados"; sólo el modo desagrupado separa `Bombon Crocante en Caja x 8 (Canje...)` como línea propia | Admin | — (instrucción operativa) | RN-038 | RF-027 | P1 | RESPALDADO por evidencia directa — recomendado documentarlo como instructivo operativo para quien exporta |
 | RF-029 | Canje Club Grido (~50% descuento, absorbido por la franquicia) es venta real con descuento, no merma; descuenta stock normalmente y la rentabilidad usa el ingreso realmente cobrado | Doc §21.1 | Sistema | `sale_line` | RN-039 | RF-027 | P1 | CONFIRMADO |
 | RF-030 | Importación idempotente: subir el mismo archivo dos veces nunca duplica ventas ni movimientos (hash de archivo + fuente + ubicación + período) | Doc §21.2; evidencia: `IMPORTACIONES_VENTAS` + control de hash ya implementado en `importarVentasDetalle_` | Sistema | `import_batch` | RN-040 | RF-027 | P1 | CONFIRMADO + EXISTENTE EN SISTEMA ACTUAL (mecanismo ya probado) |
-| RF-031 | Líneas de venta sin código de artículo (ej. "Envío a Domicilio") se registran (suman importe) pero no descuentan insumo, y no se reportan como error | Evidencia: comportamiento explícito de `importarVentasDetalle_` en sistema actual | Sistema | `sale_line` | RN-041 | RF-027 | P1 | EXISTENTE EN SISTEMA ACTUAL — regla razonable, se adopta salvo objeción |
+| RF-031 | Líneas de venta sin código de artículo (ej. "Envío a Domicilio") se registran (suman importe) pero no descuentan insumo, y no se reportan como error | Evidencia: comportamiento explícito de `importarVentasDetalle_` en sistema actual | Sistema | `sale_line` | RN-041 | RF-027 | P1 | EXISTENTE EN SISTEMA ACTUAL — tratado como **RECOMENDACIÓN TÉCNICA** de bajo impacto (no confirmado explícitamente por el cliente; si el cliente prefiriera que estas líneas se marquen para revisión en vez de aceptarse en silencio, es un cambio de validación menor, no de arquitectura) |
 | RF-032 | Códigos de artículo sin alias mapeado se listan para que el Admin los mapee antes de la próxima importación | Doc §7.1; evidencia: `sinMatchear` en sistema actual | Admin | `product_alias` (pendientes) | RN-005 | RF-004, RF-027 | P1 | CONFIRMADO |
 
 ### 4.6 Insumos y BOM — consumo automático
@@ -227,8 +232,8 @@ Prioridad: **P1** = núcleo Hito 1 (obligatorio antes de noviembre 2026), **P2**
 | RN-023 | El consumo de insumos por BOM se genera automáticamente al importar/confirmar una venta, como movimientos `BOM_CONSUMPTION` en la ubicación de la venta. | CONFIRMADO |
 | RN-024 | Un artículo sin BOM definido no genera consumo de insumos al venderse (no es error bloqueante, pero debe quedar visible como "artículo sin receta" para revisión del Admin). | RESPALDADO (evidencia: comportamiento explícito en `importarVentasDetalle_`) |
 | RN-025 | El conteo de helado a granel distingue tres estados físicos por sabor: latas cerradas (conteo exacto), latas abiertas (conteo exacto de unidades abiertas) y fracción estimada del contenido abierto (llena, 3/4, 1/2, 1/4, casi vacía). | CONFIRMADO |
-| RN-026 | El peso estándar de referencia de una lata es ~7,8 kg (evidencia: `KG_POR_LATA=7.8` ya parametrizado en el sistema actual, y `pesoxcaja≈7.8` en `estadsabores.xls`); el valor debe seguir siendo parametrizable, no hardcodeado. | EXISTENTE EN SISTEMA ACTUAL, adoptado como parámetro por defecto |
-| RN-027 | Dar de baja una lata es un movimiento de consumo normal completo por sabor (no parcial); registra usuario, ubicación, fecha y hora, y puede deshacerse el mismo día (excepto Admin, que puede deshacer en cualquier momento). | CONFIRMADO + EXISTENTE EN SISTEMA ACTUAL (regla de "mismo día") |
+| RN-026 | El peso de referencia de una lata es ~7,8 kg. Este dato está **CONFIRMADO explícitamente por el propio documento del cliente** (Doc §17: "Las latas son de aproximadamente 7,8 kg"), y coincide de forma independiente con dos fuentes de evidencia adicionales (`KG_POR_LATA=7.8` en el sistema actual, y `pesoxcaja≈7.8` en el export real `estadsabores.xls`). El campo debe implementarse **parametrizable, no hardcodeado** — igual que ya lo hace el sistema actual — para poder ajustarse si algún sabor/presentación difiere. | CONFIRMADO (Doc §17) + RESPALDADO por dos fuentes de evidencia independientes |
+| RN-027 | Dar de baja una lata es un movimiento de consumo normal completo por sabor (no parcial); registra usuario, ubicación, fecha y hora. Puede corregirse/deshacerse mediante el mecanismo general de reversión de un movimiento (sección 11.4); **la política concreta de plazo y de quién puede hacerlo queda PENDIENTE DE DEFINICIÓN (ver P-009)** — no se asume el límite de "mismo día, excepto Admin" del sistema actual. | CONFIRMADO (el hecho de ser un movimiento completo, con metadatos) — la política de reversión es **PENDIENTE DE DEFINICIÓN** |
 | RN-028 | El consumo semanal por sabor se calcula como stock inicial + ingresos − stock final − mermas/ajustes; este dato es la base directa de la futura proyección anual de compra en kilos exigida por Grido. | CONFIRMADO |
 | RN-029 | Una merma requiere obligatoriamente: producto/sabor, cantidad o fracción, motivo, foto y metadatos de local/usuario/fecha/hora. | CONFIRMADO |
 | RN-030 | Roles Empleada y Encargado de depósito pueden registrar mermas; el rol Depósito puro (según sistema actual, `DEPOSITO` sin más) queda restringido de mermas — **a confirmar si en el nuevo modelo Encargado de depósito puede registrar mermas de depósito** (ver P-005). | EXISTENTE EN SISTEMA ACTUAL (restricción de rol DEPOSITO) — parcialmente en tensión con Doc §6.2 que sí asigna "conteo físico" y "preparar salidas" a Encargado de depósito sin mencionar mermas explícitamente |
@@ -305,7 +310,7 @@ Prioridad: **P1** = núcleo Hito 1 (obligatorio antes de noviembre 2026), **P2**
 | **Sistema / Importador** (actor técnico) | Ejecutar importaciones, generar movimientos `BOM_CONSUMPTION`, calcular teórico/diferencias, generar snapshots | Todos los módulos transaccionales, sin UI propia | Crear movimientos derivados, nunca decide justificaciones ni cierra semanas | Toda decisión de negocio (justificar, cerrar, confirmar factura) requiere un actor humano | — | RESPALDADO (necesario para RN-023, RN-042, RN-053) |
 | **Super Admin** (futuro, multi-organización) | Alta de organizaciones/franquiciados, soporte, facturación | Todo, entre organizaciones | — | — | — | FUERA DE ALCANCE / FUTURO — sólo se modela la jerarquía (Doc §5), no se construye |
 
-**PENDIENTE DE DEFINICIÓN** (no bloqueante para el modelo de roles, sí para Auth — ver sección 14 y P-001): si cada Empleada/Encargado tiene **identidad individual** (usuario propio) o si, como en el sistema actual, el acceso es por **PIN compartido por rol/ubicación** sin distinguir qué persona física operó dentro de ese rol.
+**PENDIENTE DE DEFINICIÓN Y BLOQUEANTE PARA EL DISEÑO CONCRETO DE ETAPA 1** (no bloqueante para el modelo de roles en sí, que queda tal como está arriba — sí para cómo se autentica cada rol; ver sección 18 y **P-001** en la sección 22): si cada Empleada/Encargado se identifica individualmente ante cada operación, o si varias personas comparten un mismo acceso/dispositivo sin distinguirse entre sí, como ocurre hoy con el PIN compartido del sistema actual.
 
 ---
 
@@ -516,7 +521,8 @@ role(id PK, code CHECK IN ('ADMIN','DEPOSIT_MANAGER','SHOP_EMPLOYEE'), name)
 
 app_user(id PK, organization_id FK, role_id FK, default_location_id FK NULL,
          display_name, auth_subject TEXT UNIQUE, active BOOLEAN DEFAULT true, created_at)
-  -- auth_subject: id de Supabase Auth. Ver sección 14 sobre el modelo de identidad (P-001).
+  -- auth_subject: id de Supabase Auth. El significado exacto de este campo (¿una fila por
+  -- persona, o una fila por rol/ubicación compartida?) depende de P-001 — ver sección 18.2.
 ```
 
 ### 10.2 Catálogo
@@ -854,7 +860,7 @@ MOVIMIENTO DE STOCK (inventory_movement, movement_type='BOM_CONSUMPTION', produc
 | Problema | Tratamiento | Estado |
 |---|---|---|
 | Artículo sin BOM definido | No bloquea la importación de la venta; el artículo queda listado como "sin receta" para que el Admin decida si le corresponde una (RN-024). | RESPALDADO |
-| BOM faltante para un insumo nuevo | El insumo debe existir en `product` antes de poder referenciarse en `bom_line` (FK). El flujo de importación del catálogo Grido (RF-008) ya resuelve esto en el sistema actual con un paso explícito "crear los insumos que faltan antes de generar el BOM". | EXISTENTE EN SISTEMA ACTUAL — se recomienda adoptar el flujo |
+| BOM faltante para un insumo nuevo | El insumo debe existir en `product` antes de poder referenciarse en `bom_line` (FK). El flujo de importación del catálogo Grido (recomendación **R-002**, no requisito obligatorio — ver sección 20) ya resuelve esto en el sistema actual con un paso explícito "crear los insumos que faltan antes de generar el BOM". | EXISTENTE EN SISTEMA ACTUAL — trasladado como R-002, sujeto a aprobación |
 | Cambios históricos de receta | `bom` tiene `valid_from`/`valid_to`; una venta consume siempre el BOM vigente **en la fecha de la venta**, no el BOM actual. **RECOMENDACIÓN TÉCNICA** — el sistema actual no versiona el BOM (reemplaza toda la tabla al guardar), lo cual pierde este detalle; se propone corregirlo en el nuevo diseño. | RECOMENDACIÓN TÉCNICA (mejora sobre el sistema actual) |
 | Conversiones/unidades incompatibles | `bom_line.uom` debe ser convertible a la unidad base del insumo vía `product_uom_conversion`; si no hay conversión definida, la importación de esa línea de consumo debe rechazarse explícitamente (no truncarse en silencio). | RECOMENDACIÓN TÉCNICA |
 | Reimportaciones | Cubierto por la idempotencia de `import_batch` (sección 12.4): si la venta no se duplica, su consumo derivado tampoco. | CONFIRMADO |
@@ -863,7 +869,9 @@ MOVIMIENTO DE STOCK (inventory_movement, movement_type='BOM_CONSUMPTION', produc
 
 ### 13.2 Evidencia de un mecanismo de bootstrap ya construido
 
-El sistema actual permite importar el **catálogo maestro de Grido** (`lisarticulos.xls`, con columnas `artcomp4articulo..artcomp10articulo` y sus cantidades) y generar automáticamente propuestas de BOM: matchea la descripción de cada componente contra el catálogo interno (exacto / parcial con confirmación / nuevo), y genera la tabla `BOM_VENTA` a partir de eso. Es una herramienta valiosa para poblar el BOM inicial sin tipear 1174 artículos a mano — se recomienda como **R-xxx** (sección 20), no como requisito obligatorio del Hito 1, ya que el documento del cliente no lo pide explícitamente pero el costo de no reutilizarlo es alto (reconstruir a mano lo que ya existe).
+El sistema actual permite importar el **catálogo maestro de Grido** (`lisarticulos.xls`, con columnas `artcomp4articulo..artcomp10articulo` y sus cantidades) y generar automáticamente propuestas de BOM: matchea la descripción de cada componente contra el catálogo interno (exacto / parcial con confirmación / nuevo), y genera la tabla `BOM_VENTA` a partir de eso.
+
+Esto **no es un requisito del cliente** (no está pedido en el documento de requisitos) — es una solución técnica que ya existe en el prototipo. Se documenta acá como evidencia y se traslada como recomendación **R-002** (sección 20): útil para poblar el BOM inicial sin tipear ~1174 artículos a mano, pero opcional y sujeta a aprobación — el catálogo/BOM del Hito 1 puede construirse íntegramente a mano sin este mecanismo.
 
 ---
 
@@ -971,7 +979,7 @@ La dirección tecnológica del cliente (React + TypeScript + PWA + Vercel / Node
 | Capa | Elección | Justificación |
 |---|---|---|
 | Backend framework | **Fastify** (alternativa aceptable: Express) | Tipado nativo más simple con TS, mejor rendimiento en validación de payloads grandes (importaciones), ecosistema de plugins para Supabase/JWT maduro. Express también es válido si el socio programador ya lo domina (ver P-003) — no es una decisión que deba demorar el arranque. |
-| ORM / acceso a datos | **Prisma** | Migraciones declarativas versionadas (crítico dado que el documento pide explícitamente migraciones, constraints e índices desde el diseño), tipado end-to-end hacia `shared-types`, buen soporte de `CHECK`/enums de Postgres. Alternativa: Drizzle ORM (más liviano, SQL más explícito) — aceptable si se prioriza control fino sobre las transacciones del ledger; se recomienda Prisma por velocidad de desarrollo en el timeline ajustado (Doc §0.2). |
+| ORM / acceso a datos | **Prisma** (ver detalle, versión, límites y comparación con Drizzle en la subsección 17.1) | Migraciones declarativas versionadas, tipado end-to-end hacia `shared-types`. Los `CHECK` constraints, índices parciales y triggers que el DSL de Prisma no representa directamente se agregan como SQL manual dentro de sus propias migraciones (subsección 17.1) — no se asume que el ORM los resuelve solo. |
 | Validación | **Zod** | Mismo esquema puede validar en API y generar tipos en frontend; encaja con TypeScript en todas las capas. |
 | Autenticación | **Supabase Auth** | Ya es la dirección confirmada por el cliente (Doc, tabla §4). Ver sección 18 sobre el modelo de identidad pendiente de definir. |
 | Autorización | Middleware propio en la API basado en `role` + `location_id` del usuario autenticado, **nunca** confiar en el frontend (RNF-015) | Necesario porque los permisos son por rol **y** por ubicación (una Empleada sólo ve su heladería) — más granular que lo que RLS resuelve por sí solo en Hito 1 (RLS real es Hito 2, Doc §0.1). |
@@ -986,23 +994,57 @@ La dirección tecnológica del cliente (React + TypeScript + PWA + Vercel / Node
 | Observabilidad | **Sentry** (errores de front y back) + logs de Render/Supabase | Suficiente para la escala de Hito 1; no se recomienda una solución de observabilidad más pesada todavía. |
 | Backups | Backups automáticos de Supabase (point-in-time recovery del plan pagado) + verificación programada de recencia (patrón `VERIFICAR_BACKUP_RECIENTE` ya validado en el sistema actual, portado como job) | El backup no sólo debe existir: debe poder **confirmarse** que está reciente antes de operaciones sensibles (ej. antes de un cierre semanal). |
 
+### 17.1 Detalle de la decisión de ORM y migraciones (Prisma)
+
+- **Versión propuesta**: Prisma ORM, rama estable vigente al momento de iniciar Etapa 1 (serie 5.x a la fecha de este informe). **No se fija un número de versión exacto en Etapa 0**, porque Prisma cambia soporte de funcionalidades entre versiones menores; la versión concreta se fija recién al iniciar Etapa 1 y queda documentada en el lockfile del repositorio, no en este documento.
+- **Estrategia de migraciones**: Prisma Migrate, con historial versionado en el repositorio (`packages/db/prisma/migrations`). Cada migración se genera a partir de `schema.prisma` y se aplica con `prisma migrate dev` en desarrollo y `prisma migrate deploy` en CI/CD hacia Supabase.
+- **Qué representa el ORM de forma directa**: tablas, columnas, tipos, Foreign Keys, `UNIQUE`, valores `DEFAULT`, índices simples.
+- **Qué NO representa directamente y cómo se resuelve** (esto es lo que la versión 1.0 de este informe no explicitaba):
+  - **`CHECK` constraints** (ej. `CHECK (quantity <> 0)`, `CHECK (open_fraction IS NULL OR open_units > 0)`): el schema de Prisma no tiene una forma declarativa nativa de `CHECK` a la fecha de este informe. Se agregan editando a mano el SQL de la migración generada (`prisma migrate dev --create-only`, completar el `.sql` antes de aplicarla), documentando en el propio archivo de migración por qué existe cada `CHECK`.
+  - **Índices parciales/condicionales** (ej. un eventual índice único sólo sobre alias con `confirmed_by IS NULL`): tampoco expresables en el DSL de Prisma; mismo mecanismo — SQL manual dentro de la migración.
+  - **Funciones/triggers** (ej. impedir `UPDATE`/`DELETE` sobre `inventory_movement` o `inventory_snapshot` a nivel de base, no sólo de aplicación): se implementan como SQL manual dentro de una migración de Prisma (trigger `BEFORE UPDATE OR DELETE` que lanza excepción, o revocación de privilegios `REVOKE UPDATE, DELETE` al rol de aplicación sobre esas tablas).
+  - Todo SQL manual agregado a una migración de Prisma **debe pasar por code review**, porque Prisma no lo valida ni lo regenera automáticamente si el `schema.prisma` cambia después — mantenerlo sincronizado es responsabilidad del equipo, no del ORM.
+- **Compatibilidad con Supabase/PostgreSQL**: Supabase expone una conexión **directa** (sin pooler, para migraciones) y una con **pooler pgbouncer** (para el runtime de la aplicación). Prisma Migrate debe correr contra la conexión directa (`DIRECT_URL`); el cliente de Prisma en producción debe usar el pooler (`DATABASE_URL`) — patrón estándar documentado tanto por Prisma como por Supabase, no una improvisación de este informe.
+- **Comparación con una alternativa razonable — Drizzle ORM**: Drizzle expresa el esquema en TypeScript con SQL más explícito y cercano al DDL real, lo que en un dominio donde gran parte de la integridad vive en la base (este proyecto) reduce la distancia entre lo que el ORM declara y lo que Postgres realmente aplica; sus migraciones también quedan en SQL versionado. Como contrapartida, su ecosistema es más chico (menos tooling maduro tipo Prisma Studio, generación de client con relaciones anidadas menos pulida), lo que puede costar tiempo de desarrollo en un timeline ya ajustado (Doc §0.2).
+- **Por qué se mantiene Prisma como recomendación** (no se cambia sólo por esta revisión): la velocidad de desarrollo end-to-end (tipado compartido con `packages/shared-types`, generación de client, Prisma Studio para inspección rápida) pesa más que la ganancia de expresividad de Drizzle, dado el timeline del Hito 1. El costo de esta elección — constraints/índices/triggers vía SQL manual dentro de las migraciones — es conocido, acotado y ya es práctica estándar documentada por Prisma ("customizing migrations"); no es un bloqueante ni algo que aparecería recién como sorpresa en Etapa 3.
+
 ---
 
 ## 18. Seguridad
 
-Estrategia inicial (sin implementar todavía — sólo diseño):
+Esta sección separa explícitamente cuatro conceptos que suelen mezclarse cuando se habla de "cómo entra la gente al sistema", precisamente porque esa mezcla es lo que llevaría a elegir una solución de autenticación sin base real: **la elección concreta depende de una pregunta funcional que el cliente todavía no respondió (P-001, sección 22), y este informe no la responde por él.**
 
-- **Autenticación**: Supabase Auth. **Decisión pendiente y bloqueante para el diseño concreto de Etapa 1** (ver P-001): ¿cuenta individual por persona, o PIN compartido por rol/ubicación como en el sistema actual? Ambas opciones son técnicamente implementables sobre Supabase Auth (la segunda como un "usuario técnico" por rol/ubicación con PIN como contraseña corta), pero cambian el modelo de `app_user`, la granularidad de la auditoría y la UX de login.
+### 18.1 Cuatro conceptos distintos
+
+| Concepto | Pregunta que responde | Estado en este informe |
+|---|---|---|
+| **Identidad** | ¿Quién realizó realmente una operación? | **Depende de P-001**: puede ser una persona física identificada individualmente, o un rol/ubicación compartido sin distinguir la persona dentro de él. |
+| **Autenticación** | ¿Cómo demuestra el usuario (o el dispositivo/rol) quién es? | Supabase Auth, en cualquiera de los modelos de identidad que P-001 determine — ver 18.2. |
+| **Autorización** | ¿Qué puede hacer, una vez identificado? | Middleware de la API basado en rol + ubicación (sección 7). **No depende de P-001** — es la misma independientemente de cómo se resuelva la identidad. |
+| **UX operativa** | ¿Cómo se logra acceso rápido en una heladería sin destruir trazabilidad ni seguridad? | Tensión explícita a resolver junto con P-001: cuanto más individual es la identidad, más lento tiende a ser el ingreso; cuanto más compartida, más rápido pero con menos trazabilidad real por persona. |
+
+### 18.2 Alternativas técnicamente válidas para Identidad + Autenticación (ninguna elegida todavía)
+
+Las tres son implementables sobre Supabase Auth y difieren en qué queda registrado como "quién hizo la operación" y en la fricción de login. **Ninguna usa un PIN corto como si fuera la contraseña convencional de una cuenta de Supabase Auth**: un PIN de 4 dígitos no tiene la entropía necesaria para funcionar de forma segura como credencial criptográfica por sí solo, y además, si es compartido, elimina la posibilidad de distinguir personas — que es justamente lo que la auditoría del documento del cliente (RN-060) necesita.
+
+- **Opción A — Identidad individual real**: cada Empleada/Encargado tiene su propia cuenta en Supabase Auth. La auditoría queda atribuida siempre a la persona real. Requiere dar de alta a cada empleado y un login algo más lento, salvo que se combine con sesión persistente por dispositivo para no pedir credenciales en cada turno.
+- **Opción B — Cuenta técnica por rol/ubicación + selección de responsable**: el dispositivo de cada local se autentica una sola vez con una cuenta técnica de Supabase Auth (una por rol/ubicación, con contraseña robusta que las empleadas no necesitan conocer ni tipear — la gestiona el Admin). Dentro de esa sesión ya autenticada, cada operación pide elegir o escribir el nombre de quien la está haciendo; ese nombre queda en la auditoría como dato operativo, no como credencial. Login rápido (una vez por dispositivo/turno); trazabilidad parcial, sujeta a que la persona elija bien su nombre.
+- **Opción C — Híbrido, PIN corto como capa de UX sobre una sesión ya autenticada**: igual que la Opción B, pero en vez de elegir un nombre de una lista, cada persona tiene un PIN corto **individual** (no compartido) que sólo sirve para identificarse rápido dentro de una sesión de dispositivo ya autenticada por Supabase Auth — el PIN nunca es en sí mismo la credencial de Supabase Auth. Mantiene una velocidad de ingreso cercana a la actual, con trazabilidad individual real.
+
+La elección entre estas opciones (o una variante) depende de cómo trabaja realmente el negocio hoy: cuántos dispositivos hay por local, si conviene saber siempre quién hizo cada carga o alcanza con saber el local, y qué tan rápido necesita ser el ingreso. **Esa es exactamente la pregunta reformulada como P-001 en la sección 22** — este informe no elige entre A, B o C porque hacerlo sin esa respuesta sería convertir una decisión de negocio en un supuesto técnico.
+
+### 18.3 Lo que no depende de P-001
+
 - **Autorización**: middleware por rol + ubicación en cada endpoint de la API (nunca sólo en el frontend), replicando el principio ya aplicado hoy (`soloAdmin_()` en cada acción) pero de forma centralizada y testeable, no repetida acción por acción.
 - **Roles**: `ADMIN`, `DEPOSIT_MANAGER`, `SHOP_EMPLOYEE` (sección 7); `SUPER_ADMIN` modelado para Hito 2, sin uso en Hito 1.
 - **Validación**: Zod en el borde de la API — todo payload de escritura se valida antes de tocar la capa de dominio.
 - **Archivos**: validación de tipo MIME real (no sólo extensión), límite de tamaño, cuarentena del archivo original en Storage antes de procesar (permite reprocesar/auditar una importación fallida sin pedir el archivo de nuevo).
 - **Endpoints**: HTTPS obligatorio (Render + Vercel lo dan por defecto), CORS restringido a los dominios de las dos apps.
-- **Sesiones/tokens**: JWT de Supabase Auth, expiración corta + refresh; en la PWA, persistencia de sesión para minimizar fricción de reingreso en el local (RNF-001).
-- **Secretos**: variables de entorno en Render/Vercel/Supabase, nunca en el repositorio; el sistema actual guarda un PIN en texto plano en una hoja de cálculo — **esto no se replica** en el nuevo sistema bajo ninguna circunstancia.
+- **Sesiones/tokens**: JWT de Supabase Auth con expiración + refresh; en la PWA, persistencia de sesión por dispositivo para minimizar fricción de reingreso en el local (RNF-001) — el detalle exacto de qué queda persistido (una sesión de dispositivo vs. una sesión por persona) depende de la opción elegida en 18.2.
+- **Secretos**: variables de entorno en Render/Vercel/Supabase, nunca en el repositorio; el sistema actual guarda un PIN en texto plano en una hoja de cálculo — **esto no se replica** en el nuevo sistema bajo ninguna circunstancia, sea cual sea la opción elegida en 18.2.
 - **Logs**: separar logs de aplicación (Pino/Sentry) de auditoría de negocio (`audit_log` en Postgres) — no mezclar ambos.
-- **Rate limiting**: límite básico por IP/usuario en endpoints de login e importación, para mitigar fuerza bruta sobre PIN corto si se opta por ese modelo (razón adicional para resolver P-001 temprano).
-- **Auditoría**: sección 15 — es en sí misma un control de seguridad (trazabilidad de quién hizo qué).
+- **Rate limiting**: límite básico por IP/dispositivo en endpoints de login e importación — más importante cuanto más se acerque la solución elegida a la Opción B/C (una cuenta técnica compartida por local es un blanco más atractivo de fuerza bruta que cuentas individuales).
+- **Auditoría**: sección 15 — es en sí misma un control de seguridad (trazabilidad de quién hizo qué); su granularidad real (persona vs. rol/ubicación) depende de la opción elegida en 18.2.
 
 ---
 
@@ -1037,7 +1079,7 @@ Esta separación es exactamente la que pide el documento del cliente (§0.1: "se
 | ID | Problema | Recomendación | Beneficio | Costo/complejidad | Prioridad | Etapa sugerida | ¿Modifica un requisito? |
 |---|---|---|---|---|---|---|---|
 | R-001 | Reconstruir desde cero el matching de nombres factura↔catálogo y ventas↔catálogo, cuando ya existe un algoritmo probado en producción (`matchProducto`, por tokens con bonus de "x N") | Portar la lógica (no el código Apps Script) al backend TypeScript como servicio de dominio reutilizable entre los tres importadores | Ahorra tiempo de diseño/tuning de un algoritmo que ya fue validado con datos reales | Bajo | Alta | Etapa 2 (Catálogo) / Etapa 5 (Ventas) | No — es una decisión de implementación, no cambia ningún RF/RN |
-| R-002 | Reconstruir a mano el catálogo de ~1174 artículos y sus BOM | Adoptar el flujo de importación del catálogo maestro de Grido + generación asistida de BOM ya construido en el prototipo (RF-008, sección 13.2) | Evita cargar manualmente cientos de recetas; usa el propio archivo del franquiciante como fuente | Medio (requiere UI de confirmación de matches) | Media | Etapa 2 | No |
+| R-002 | Reconstruir a mano el catálogo de ~1174 artículos y sus BOM (nota: en la v1.0 de este informe esto figuraba como el requisito RF-008; se reclasificó acá en la revisión de Etapa 0.1 — ver `docs/ETAPA-0.1-CORRECCIONES.md` — porque no está pedido explícitamente por el cliente) | Adoptar el flujo de importación del catálogo maestro de Grido + generación asistida de BOM ya construido en el prototipo (sección 13.2), **sujeto a aprobación explícita del cliente antes de incluirse en el alcance de Etapa 2** | Evita cargar manualmente cientos de recetas; usa el propio archivo del franquiciante como fuente | Medio (requiere UI de confirmación de matches) | Media | Etapa 2, si se aprueba | **Sí lo aclara**: no es obligatorio para cerrar Etapa 2 — el catálogo/BOM del Hito 1 puede completarse íntegramente a mano sin esto |
 | R-003 | El sistema actual parsea Excel/PDF **en el navegador** antes de mandar JSON al backend | Mover el parseo de archivos al backend (SheetJS/pdf-parse server-side) | Permite validar, reprocesar y auditar una importación sin depender del navegador/dispositivo del usuario; habilita reintentos server-side | Medio | Alta | Etapa 5 (importador de ventas) | No |
 | R-004 | El BOM del sistema actual no está versionado (se reemplaza entero al editar) | Versionar BOM con `valid_from`/`valid_to` (sección 13.1) | Permite recalcular consumo histórico correctamente aunque la receta cambie | Bajo | Media | Etapa 2 | No — es un refinamiento del propio RN-020/023 |
 | R-005 | Riesgo de cuello de botella: sólo Admin justifica diferencias y cierra semanas (ya señalado por el propio cliente, Doc §6.1) | Diseñar el modelo de permisos para que sea trivial en Hito 1b/Hito 2 delegar "justificar diferencias" a un segundo rol de confianza, sin rediseñar el esquema | Evita que el crecimiento a un segundo local o temporada alta bloquee el cierre semanal en una sola persona | Bajo (si se decide temprano) | Media | Etapa 1 (diseño de roles) | No — el documento ya lo señala como riesgo a tener presente, no pide resolverlo ahora |
@@ -1072,14 +1114,15 @@ Esta separación es exactamente la que pide el documento del cliente (§0.1: "se
 
 | ID | Pregunta concreta | Por qué se necesita | Qué afecta | ¿Bloquea arquitectura? | ¿Bloquea desarrollo? | Etapa máxima sin resolverla |
 |---|---|---|---|---|---|---|
-| P-001 | **¿El acceso de Empleada/Encargado de depósito es por cuenta individual (usuario propio en Supabase Auth) o por PIN compartido por rol/ubicación, como en el sistema actual?** | Cambia el modelo de `app_user`, la granularidad real de la auditoría ("usuario" en RN-060 sería un rol compartido, no una persona), el diseño de UX de login, y si aplica rate limiting por persona o por ubicación. | Modelo de datos (`app_user`), Auth (Supabase), UX de login, auditoría | **Sí, para el diseño concreto de Etapa 1 (Auth)** — el esquema `app_user` puede modelarse de forma que soporte ambas opciones sin romperse, pero la UX y el flujo de Auth sí deben decidirse antes de construir Etapa 1. | No bloquea Etapa 0 (este informe puede aprobarse sin esto resuelto) | **Etapa 0.** Debe resolverse antes de iniciar Etapa 1. |
-| P-002 | ¿Qué umbral concreto de diferencia dispara un reconteo para producto cerrado, y cuál para helado a granel (fracción estimada)? | Sin el valor, el diseño (RN-014) queda correcto conceptualmente pero no implementable. | Motor de inventario (Etapa 3), UX de conteo | No | No (puede quedar como parámetro configurable con un valor por defecto razonable hasta que el cliente lo confirme) | Etapa 3 |
+| P-001 | 🔴 **BLOQUEANTE.** Reformulada en Etapa 0.1 para que la pueda responder una persona no técnica (ver razón en `docs/ETAPA-0.1-CORRECCIONES.md`): Cuando una Empleada de heladería o el Encargado de depósito usan el sistema — **(a)** ¿cada persona se identifica individualmente (con su nombre/usuario propio) antes de cargar algo, o varias personas comparten el mismo acceso/dispositivo sin distinguirse entre sí? **(b)** ¿hay un celular/tablet por persona, o uno solo compartido por local? **(c)** si es compartido: cuando después hay que preguntar "¿quién cargó esto?" (por ejemplo, ante una diferencia de stock), ¿necesitan poder saber exactamente qué persona lo hizo, o alcanza con saber que fue "alguien de tal heladería"? **(d)** ¿el ingreso al sistema tiene que ser lo más rápido posible (unos segundos, como hoy con el PIN), aunque eso signifique no saber la persona exacta, o puede tomar un poco más si eso permite identificarla? | Determina el modelo de `app_user` (sección 10.1), qué tan individual es la auditoría real (RN-060), y el diseño de UX de login (sección 18.2 — tres alternativas técnicas presentadas, ninguna elegida). | Modelo de datos (`app_user`), Auth (Supabase), UX de login, granularidad de la auditoría | **Sí, para el diseño concreto de Etapa 1** — el esquema puede prepararse para soportar cualquier respuesta sin romperse, pero el flujo de Auth en sí no puede construirse sin esta respuesta. | No bloquea la aprobación de Etapa 0, **sí bloquea el inicio de Etapa 1**. | **Etapa 0.** Debe resolverse antes de iniciar Etapa 1 — no se avanza con Auth sin esta respuesta. |
+| P-002 | ¿Qué umbral concreto de diferencia dispara un reconteo para producto cerrado, y cuál para helado a granel (fracción estimada)? | Sin el valor, el diseño (RN-014) queda correcto conceptualmente pero no implementable. Corregido en Etapa 0.1: **no se propone ningún valor por defecto** — un porcentaje, cantidad o tolerancia inventada sería una regla de negocio no confirmada. | Motor de inventario (Etapa 3), UX de conteo (Etapa 4) | No — el campo se diseña configurable, sin ningún valor asignado. | **Parcialmente**: no bloquea construir el ledger, el cálculo de teórico/diferencia ni el resto de Etapa 3; **sí bloquea activar en producción el disparo automático de reconteo** (Etapa 3/4) hasta contar con el número real. | Etapa 3 puede completarse por entero sin este valor (ver sección 23); lo único que queda pendiente de activar es el disparo automático de reconteo. |
 | P-003 | ¿El socio programador tiene experiencia real con PostgreSQL/Supabase y React/PWA, o conviene ajustar el stack? (pregunta ya planteada por el propio cliente, Doc Anexo B) | Es la decisión de mayor impacto en si se llega al timeline de noviembre 2026, según el propio documento. | Stack (sección 17), timeline | No (la dirección tecnológica ya está confirmada por el cliente como punto de partida) | No, pero condiciona la velocidad real de Etapas 1 en adelante | No bloquea ninguna etapa de este informe; es una decisión de equipo, no de arquitectura |
 | P-004 | ¿Cuál es el insumo real que el Admin va a usar cada semana para el cierre de Mercado Pago: el PDF/impresión del email, un export CSV/XLSX del panel de MP, o pegar el texto del email? | Determina el parser concreto del importador de caja (sección 12.2). | Importador de Mercado Pago (Etapa 7) | No | Sí, para construir el importador específico | Etapa 6 (puede diseñarse el resto del cierre semanal sin esto) |
-| P-005 | ¿El Encargado de depósito puede registrar mermas de mercadería en el depósito (hoy restringido en el prototipo actual), o esa responsabilidad es exclusiva de las heladerías? | El documento asigna mermas a "cada heladería" (§19) sin mencionar depósito explícitamente; el prototipo actual bloquea mermas para el rol DEPOSITO. | Permisos (sección 7), `waste_event` | No | No (se puede construir con la restricción actual y habilitarlo después sin cambio de esquema) | Cualquiera — no bloquea, sólo hay que fijar el valor por defecto |
+| P-005 | ¿El Encargado de depósito puede registrar mermas de mercadería en el depósito (hoy restringido en el prototipo actual), o esa responsabilidad es exclusiva de las heladerías? | El documento asigna mermas a "cada heladería" (§19) sin mencionar depósito explícitamente; el prototipo actual bloquea mermas para el rol DEPOSITO. | Permisos (sección 7), `waste_event` | No | No — mientras no se confirme, el sistema construye la restricción ya evidenciada en el prototipo actual (Encargado de depósito no registra mermas), reversible sin cambio de esquema si el cliente confirma lo contrario. | Cualquiera — no bloquea nada, sólo hay que fijar la restricción heredada hasta tener respuesta |
 | P-006 | ¿Cuál es el nombre y la lista real y vigente de ubicaciones operativas — "Saavedra" y "Aristóbulo del Valle/El Pozo" (como en el documento y los exports reales) o "Aristóbulo del Valle" y "JJ Paso" (como en el código del prototipo)? | Necesario para sembrar datos reales de `location` en Etapa 1 sin tener que corregirlos después. | Datos semilla (Etapa 1) | No | Sí, para el seed de datos, no para el esquema | Etapa 1 |
 | P-007 | (Ya identificada por el cliente, Doc Anexo B) Falta el mapeo campo-por-campo de la planilla de papel real de conteo de las heladerías. Recomendación del propio cliente: fotografiarla y usarla como wireframe literal. | Condiciona el diseño exacto de la pantalla de conteo (orden y nombres de campos), que es la de mayor prioridad de adopción del proyecto. | UX de la app de heladería (Etapa 4) | No | Sí, para finalizar el diseño visual de la pantalla de conteo (el modelo de datos subyacente, `stock_count_line`, no depende de esto) | Etapa 3 (el motor de inventario puede construirse sin esto; la pantalla de Etapa 4 sí lo necesita) |
 | P-008 | (Ya identificada por el cliente, Doc §13) Cuando depósito transfiere mercadería a una heladería, ¿la capa de costo FIFO viaja con el producto transferido o el destino arranca una capa nueva al costo de recepción? | Afecta el diseño de `inventory_cost_layer`, pero FIFO está explícitamente fuera del Hito 1. | Costeo FIFO (Hito 2/Fase 2) | No | No | No bloquea ninguna etapa de este informe — se documenta para no perderla de vista cuando llegue Hito 1b/2 |
+| P-009 | **Nueva en Etapa 0.1.** ¿Qué corrección/anulación debe permitirse realmente sobre una baja de lata ya registrada? Concretamente: ¿la misma persona que la cargó puede deshacerla en cualquier momento, sólo el mismo día, sólo dentro de una ventana corta (ej. minutos), o siempre necesita intervención del Admin? ¿Existe un límite de tiempo, o alcanza con que quede registrado quién corrige y por qué? | El sistema actual restringe el deshacer a "mismo día, excepto Admin", pero es comportamiento heredado del prototipo, no un requisito confirmado por el cliente (Doc no lo menciona). Sin esta definición no puede implementarse ninguna restricción temporal/de rol sin arriesgarse a inventar una regla de negocio. | Política de reversión de RF-022, permisos de Empleada/Encargado/Admin | No — el mecanismo genérico de reversión de un movimiento (sección 11.4) ya cubre cualquier política que se defina, sin cambio de esquema. | Sí, para la política concreta de la pantalla "deshacer baja de lata" (Etapa 4). | Etapa 4: la pantalla puede construirse sin el límite exacto — mientras tanto, deshacer requiere motivo y queda auditado, sin ningún límite automático de tiempo ni de rol. |
 
 Las preguntas de naturaleza societaria/comercial del propio Anexo B del cliente (formalización de sociedad, reparto de costos de infraestructura) **no se incluyen aquí** por no ser preguntas de arquitectura de software — se mencionan sólo para que no se pierdan de vista como pendientes del negocio.
 
@@ -1120,48 +1163,87 @@ Se adopta y detalla la secuencia de 9 etapas ya validada por el propio cliente e
 
 ### ETAPA 2 — Catálogo: productos, grupos, sabores, packaging, BOM
 - **Objetivo**: catálogo maestro completo y BOM inicial cargado.
-- **Alcance**: CRUD de productos/grupos/subgrupos, alias, conversiones de unidad, BOM versionado; importador del catálogo maestro de Grido con generación asistida de BOM (RF-008, R-001, R-002).
-- **Requisitos incluidos**: RF-001 a RF-008, RF-033 a RF-035; RN-001 a RN-006, RN-020 a RN-024.
+- **Alcance obligatorio**: CRUD de productos/grupos/subgrupos, alias, conversiones de unidad, BOM versionado (RF-001 a RF-007) — el catálogo se puede poblar íntegramente a mano (partiendo del semillero de ~160 productos del prototipo, revisado/depurado) sin depender de ningún importador automático.
+- **Mejora opcional, no obligatoria** (R-002, sección 20): si el cliente la aprueba, importador asistido del catálogo maestro de Grido con generación semi-automática de propuestas de BOM. Si no se aprueba, Etapa 2 se cierra igual sin ella.
+- **Requisitos incluidos**: RF-001 a RF-007, RF-033 a RF-035; RN-001 a RN-006, RN-020 a RN-024. (R-002 corre en paralelo como mejora opcional, no como requisito de esta etapa.)
 - **Base de datos**: `product_group`, `product`, `product_alias`, `product_uom_conversion`, `bom`, `bom_line`.
-- **Backend**: servicios de catálogo, matching de alias (algoritmo portado de R-001), importador de catálogo Grido.
+- **Backend**: servicios de catálogo, matching de alias (algoritmo de referencia en R-001, reutilizable luego en Etapa 5 y Etapa 8); importador de catálogo Grido sólo si se aprueba R-002.
 - **Frontend (Admin)**: ABM de productos, pantalla de confirmación de alias/BOM sugeridos.
-- **Importadores**: catálogo Grido (`.xls`, opcional/asistente de bootstrap — no es un importador recurrente).
+- **Importadores**: ninguno obligatorio; catálogo Grido (`.xls`) sólo si se aprueba R-002 (asistente de bootstrap, no un importador recurrente).
 - **Dependencias**: Etapa 1.
 - **Qué NO debe hacerse todavía**: ledger de movimientos, conteos, ventas.
 - **Pruebas**: un artículo sin BOM no bloquea nada; un alias sin confirmar no impacta el catálogo; conversión de unidad calcula correctamente packs/cajas/unidades.
-- **Criterios de aceptación**: catálogo migrado (al menos el semillero de ~160 productos del prototipo, revisado/depurado) + BOM inicial cargado para los artículos de mayor venta.
+- **Criterios de aceptación**: catálogo cargado (a mano o, si se aprobó R-002, asistido) + BOM inicial cargado para los artículos de mayor venta.
 - **Entregable**: catálogo operable desde el panel Admin.
 - **Condición para avanzar a Etapa 3**: catálogo y BOM aprobados por el cliente como representativos de la operación real.
 
-### ETAPA 3 — Motor de inventario: ledger, balances, conteos, ajustes, diferencias
-- **Objetivo**: el corazón técnico del sistema.
-- **Alcance**: `inventory_movement` y todos sus tipos; `stock_balance`; `stock_count`/`stock_count_line` con conteo ciego, autoguardado y umbrales de reconteo (P-002 se resuelve aquí, con valor por defecto si el cliente aún no lo confirmó); ajustes justificados por Admin.
-- **Requisitos incluidos**: RF-009 a RF-023; RN-007 a RN-028.
-- **Base de datos**: sección 10.3 completa + `stock_count`/`stock_count_line`.
-- **Backend**: servicio de ledger (única puerta de escritura de stock), cálculo de teórico, transacciones atómicas de cierre de conteo.
-- **Frontend**: aún no la pantalla final de conteo (eso es Etapa 4) — sí herramientas de Admin para ver stock/movimientos.
+### ETAPA 3 — Motor de inventario (backend/dominio/persistencia): ledger, balances, conteo, diferencias, ajustes
+
+> **Nota de Etapa 0.1**: las Etapas 3 y 4 de la v1.0 de este informe compartían varios RF sin indicar qué parte se completaba en cada una. Esta versión las separa por capa — Etapa 3 es exclusivamente **backend + persistencia + UI de Admin (desktop)**; Etapa 4 es exclusivamente **frontend PWA (mobile-first)** para Empleada/Encargado de depósito. Ningún RF figura como "completamente implementado" en ambas: cada uno tiene un dueño claro de dónde queda COMPLETO.
+
+- **Objetivo**: construir el motor de dominio íntegro del inventario — todo lo que puede probarse por API y desde el panel Admin, sin depender todavía de la PWA de heladería (Etapa 4).
+- **Alcance**: sólo backend + persistencia + pantallas de Admin (desktop). **Cero pantallas mobile-first** en esta etapa.
+- **Requisitos incluidos, con la parte que queda COMPLETA aquí**:
+
+| RF | Qué se construye en Etapa 3 | ¿Queda COMPLETO en Etapa 3? |
+|---|---|---|
+| RF-009, RF-010 (ledger, tipos de movimiento) | Esquema + servicio de ledger íntegro | **Sí** |
+| RF-015, RF-016 (stock teórico, diferencia) | Cálculo 100% backend, sin captura de actor | **Sí** |
+| RF-017 (justificar diferencias, Admin) | Backend + pantalla de Admin (desktop) | **Sí** |
+| RF-018 (cierre de conteo → `COUNT_CORRECTION`) | Backend transaccional + acción desde panel Admin | **Sí**, en mecanismo (su prueba con datos reales de producción requiere conteos ya cargados en Etapa 4, pero la funcionalidad no depende de la PWA) |
+| RF-011 (stock inicial) | Endpoint que persiste un conteo como `INITIAL_STOCK` | No — se completa en Etapa 4 (usa la misma pantalla de conteo) |
+| RF-012 (conteo semanal ciego) | Esquema `stock_count`/`stock_count_line` + cálculo server-side del teórico tras guardar | No — se completa en Etapa 4 (pantalla de conteo) |
+| RF-014 (umbral de reconteo) | Mecanismo de comparación contra un parámetro **configurable** (ver tratamiento de P-002 abajo) | No — la UI que solicita el reconteo es Etapa 4; el valor en sí es PENDIENTE (P-002) |
+| RF-019 (marcar sin stock) | Endpoint `stockout_event` + lógica de alerta | No — el botón de "un toque" es Etapa 4 |
+| RF-020 (conteo por sabor: latas cerradas/abiertas/fracción) | Campos de `stock_count_line` para granel | No — se completa en Etapa 4 |
+| RF-021 (baja de lata) | Endpoint `ICE_CREAM_CONTAINER_CLOSE` | No — el botón de "un toque" es Etapa 4 |
+| RF-022 (deshacer baja de lata) | Mecanismo genérico de reversión (sección 11.4), **sin política de plazo/rol** — ver P-009 | No — la pantalla es Etapa 4; la política concreta sigue pendiente en ambas |
+| RF-023 (consumo semanal por sabor) | Vista/cálculo agregado sobre el ledger | **Sí**, en cálculo (no requiere captura de actor) |
+| RF-024, RF-025 (merma, con foto) | Endpoint `waste_event` + movimiento `WASTE` + cálculo de costo perdido/valor perdido | No — la pantalla de carga (con cámara) es Etapa 4 |
+| RF-026 (gasto variable) | Endpoint `variable_expense` | No — la pantalla es Etapa 4 |
+| RF-013 (autoguardado local) | **No corresponde a esta etapa** — es 100% mecanismo de cliente (PWA) | No — pertenece íntegramente a Etapa 4 |
+
+  Las entidades `waste_event`, `variable_expense` y `stockout_event` **se crean en Etapa 3** (backend), sin ambigüedad: son necesarias porque los RF que las usan (RF-024, RF-026, RF-019) están confirmados por el documento del cliente. Etapa 3 las deja operables por API/Admin; Etapa 4 construye la pantalla que las usa en producción.
+- **Umbrales de reconteo (P-002) — tratamiento explícito**: el campo se diseña **configurable por tipo de producto** (cerrado vs. granel) desde el esquema, sin ningún valor numérico asignado por este informe. Esto **no bloquea** el resto de Etapa 3 — ledger, cálculo de teórico, diferencia y ajustes no dependen de este número. Lo único que **sí queda bloqueado** hasta que el cliente confirme P-002 es la **activación real** del disparo automático de reconteo en producción. El mecanismo queda listo para recibir el valor apenas se confirme, sin requerir cambio de esquema.
+- **Base de datos**: sección 10.3 completa (`inventory_movement`) + `stock_count`/`stock_count_line` + `waste_event` + `variable_expense` + `stockout_event`.
+- **Backend**: servicio de ledger (única puerta de escritura de stock), cálculo de teórico, transacciones atómicas de cierre de conteo, endpoints de merma/gasto/sin-stock/baja de lata (consumidos por UI recién en Etapa 4).
+- **Frontend**: **sólo panel Admin (desktop)** — vista de stock/movimientos, pantalla de justificación de diferencias, acción de cierre de conteo. Ninguna pantalla PWA/mobile.
 - **Importadores**: ninguno todavía.
 - **Dependencias**: Etapa 2 (necesita productos existentes).
-- **Qué NO debe hacerse todavía**: UI final de conteo mobile (Etapa 4), importación de ventas (Etapa 5).
-- **Pruebas**: el saldo recalculado desde el histórico coincide siempre con `stock_balance`; un ajuste sin motivo es rechazado por constraint; dos conteos concurrentes de la misma semana/ubicación no pueden coexistir (constraint `UNIQUE`).
-- **Criterios de aceptación**: stock teórico correcto tras una secuencia de movimientos de prueba con todos los tipos; diferencia se calcula y se puede justificar; cierre de conteo genera `COUNT_CORRECTION` correctamente.
-- **Entregable**: motor de inventario probado por API (aún sin pantalla mobile final).
-- **Condición para avanzar a Etapa 4**: pruebas automatizadas de teórico/diferencias/idempotencia de ajuste en verde.
+- **Qué NO debe hacerse todavía**: ninguna pantalla de captura para Empleada/Encargado de depósito (eso es Etapa 4 completa); importación de ventas (Etapa 5).
+- **Pruebas**: el saldo recalculado desde el histórico coincide siempre con `stock_balance`; un ajuste sin motivo es rechazado por constraint; dos conteos concurrentes de la misma semana/ubicación no pueden coexistir (constraint `UNIQUE`); los endpoints de merma/gasto/sin-stock/baja de lata/conteo funcionan correctamente probados por API, sin UI todavía.
+- **Criterios de aceptación**: stock teórico correcto tras una secuencia de movimientos de prueba con todos los tipos; diferencia se calcula y se puede justificar desde el panel Admin; cierre de conteo genera `COUNT_CORRECTION` correctamente; todos los endpoints que Etapa 4 va a consumir responden correctamente vía API.
+- **Entregable**: motor de inventario completo y probado por API + panel Admin funcional para diferencias y cierre de conteo (aún sin pantalla mobile).
+- **Condición para avanzar a Etapa 4**: pruebas automatizadas de teórico/diferencias/idempotencia de ajuste en verde; todos los endpoints que Etapa 4 va a consumir están construidos y documentados.
 
-### ETAPA 4 — App heladería (prioridad de validación con usuario real)
-- **Objetivo**: la pantalla de mayor impacto de adopción del proyecto.
-- **Alcance**: conteo (calcado de la planilla de papel real — P-007 idealmente resuelto antes de esta etapa), mermas con foto, baja de lata en un toque, gasto variable, marcar sin stock — todo mobile-first, PWA, offline-friendly.
-- **Requisitos incluidos**: RF-012 a RF-014, RF-019 a RF-026.
-- **Base de datos**: `waste_event`, `variable_expense`, `stockout_event` (ya definidas en Etapa 3 de ser necesario, se activan aquí).
-- **Backend**: endpoints correspondientes, ya construidos sobre el motor de Etapa 3.
-- **Frontend (PWA)**: pantalla de conteo, merma, baja de lata, gasto, sin stock.
+### ETAPA 4 — App heladería (frontend/PWA): experiencia operativa de Empleada y Encargado de depósito
+- **Objetivo**: la pantalla de mayor impacto de adopción del proyecto — construir la capa de captura mobile-first que consume el motor ya terminado en Etapa 3.
+- **Alcance**: exclusivamente **frontend PWA** (mobile-first). No agrega entidades ni reglas de negocio nuevas — consume los endpoints ya construidos en Etapa 3. Diseño calcado de la planilla de papel real (P-007 idealmente resuelto antes de esta etapa).
+- **Requisitos incluidos, con dónde queda COMPLETO cada uno**:
+
+| RF | Qué agrega Etapa 4 | ¿Queda COMPLETO acá? |
+|---|---|---|
+| RF-011 (stock inicial) | Pantalla de conteo, usada en modo inicial | **Sí** |
+| RF-012 (conteo semanal ciego) | Pantalla de conteo mobile | **Sí** |
+| RF-013 (autoguardado local) | Mecanismo de borrador local | **Sí**, exclusivo de esta etapa |
+| RF-014 (umbral de reconteo) | Pantalla que solicita el reconteo | **Operable, no activo**: la pantalla existe, pero el disparo automático permanece deshabilitado hasta resolver P-002 (Etapa 3) |
+| RF-019 (marcar sin stock) | Botón de un toque | **Sí** |
+| RF-020 (conteo por sabor) | Campos de latas cerradas/abiertas/fracción en la pantalla de conteo | **Sí** |
+| RF-021 (baja de lata) | Botón de un toque | **Sí** |
+| RF-022 (deshacer baja de lata) | Pantalla de "deshacer" | **Operable, sin política final**: no se activa ninguna restricción de plazo/rol hasta resolver P-009 — mientras tanto, deshacer exige motivo y queda auditado, sin límite automático |
+| RF-024, RF-025 (merma con foto) | Pantalla de carga con cámara | **Sí** |
+| RF-026 (gasto variable) | Pantalla de carga | **Sí** |
+
+- **Base de datos**: ninguna tabla nueva — usa `waste_event`, `variable_expense`, `stockout_event`, `stock_count`/`stock_count_line` e `inventory_movement`, todas **creadas en Etapa 3**.
+- **Backend**: ninguno nuevo — consume los endpoints de Etapa 3.
+- **Frontend (PWA)**: pantalla de conteo (inicial y semanal), merma, baja de lata (+ deshacer), gasto, sin stock.
 - **Importadores**: ninguno.
-- **Dependencias**: Etapa 3.
-- **Qué NO debe hacerse todavía**: importación de ventas, cierre semanal, caja.
+- **Dependencias**: Etapa 3 completa (todos los endpoints que esta etapa consume).
+- **Qué NO debe hacerse todavía**: importación de ventas, cierre semanal, caja; ninguna regla de negocio nueva que no exista ya en Etapa 3 — si durante esta etapa se detecta una regla faltante, se vuelve a Etapa 3, no se resuelve ad hoc en el frontend.
 - **Pruebas**: E2E (Playwright) del flujo completo conteo→guardar con conexión simulada intermitente; verificación de que un borrador sobrevive a un refresh de página.
-- **Criterios de aceptación**: **validación explícita con una empleada real** (criterio de aceptación puesto por el propio cliente, no inventado por este informe) — el tiempo de carga debe ser igual o menor al de la planilla de papel (RNF-001).
+- **Criterios de aceptación**: **validación explícita con una empleada real** (criterio puesto por el propio cliente, no inventado por este informe) — el tiempo de carga debe ser igual o menor al de la planilla de papel (RNF-001). La validación del disparo automático de reconteo (RF-014) queda fuera de este criterio hasta que P-002 esté resuelto; el resto de las pantallas se valida igual.
 - **Entregable**: PWA instalable, usada en paralelo al papel durante la validación.
-- **Condición para avanzar a Etapa 5**: la empleada real valida que la pantalla es igual o más rápida que el papel; ningún borrador se perdió en la prueba.
+- **Condición para avanzar a Etapa 5**: la empleada real valida que la pantalla es igual o más rápida que el papel; ningún borrador se perdió en la prueba; RF-011 a RF-026 quedan completos de punta a punta (con la salvedad explícita del valor numérico de RF-014 y la política final de RF-022, ambos pendientes de P-002/P-009 sin bloquear el resto).
 
 ### ETAPA 5 — Importador de ventas
 - **Objetivo**: dejar de depender de que alguien sume manualmente el total de ventas.
@@ -1263,12 +1345,12 @@ flowchart LR
 
 *(Extracto representativo — la trazabilidad completa RF↔RN↔Entidad↔Módulo↔Etapa↔Prueba se sostiene 1 a 1 en las tablas de las secciones 4, 5, 10 y 23; esta tabla resume el recorrido completo para los bloques funcionales principales.)*
 
-| Requisito | Regla(s) | Entidad(es) | Módulo | Etapa | Tipo de prueba |
+| Requisito | Regla(s) | Entidad(es) | Módulo | Etapa (backend/schema → completo) | Tipo de prueba |
 |---|---|---|---|---|---|
-| RF-001..008 (Catálogo) | RN-001..006, RN-020..024 | `product`, `product_group`, `product_alias`, `bom`, `bom_line` | Catálogo | Etapa 2 | Unitaria (conversión de unidades, matching de alias) |
-| RF-009..019 (Stock/Conteo) | RN-007..019 | `inventory_movement`, `stock_balance`, `stock_count` | Motor de inventario | Etapa 3 | Unitaria (cálculo de teórico) + integración (transacción de cierre de conteo) |
-| RF-020..023 (Latas/granel) | RN-025..028 | `stock_count_line`, `inventory_movement` | App heladería | Etapa 4 | E2E (baja de lata) |
-| RF-024..026 (Mermas/gasto) | RN-029..033 | `waste_event`, `variable_expense` | App heladería | Etapa 4 | E2E (merma con foto) |
+| RF-001..007 (Catálogo) | RN-001..006, RN-020..024 | `product`, `product_group`, `product_alias`, `bom`, `bom_line` | Catálogo | Etapa 2 (única — no requiere PWA) | Unitaria (conversión de unidades, matching de alias) |
+| RF-009, RF-010, RF-015..018 (Ledger, teórico, diferencia, justificación, cierre de conteo) | RN-007..018 | `inventory_movement`, `stock_balance`, `stock_count` | Motor de inventario | Etapa 3 (única — Admin desktop, sin PWA) | Unitaria (cálculo de teórico) + integración (transacción de cierre de conteo) |
+| RF-011..014, RF-019..023 (Conteo, latas/granel, umbral de reconteo, sin stock, consumo por sabor) | RN-011..016, RN-019, RN-025..028 | `stock_count_line`, `inventory_movement`, `stockout_event` | Etapa 3 → backend/esquema; Etapa 4 → COMPLETO (pantalla PWA) | Etapa 3 (backend) **→** Etapa 4 (completo) | Unitaria backend (Etapa 3) + E2E de la pantalla (Etapa 4) |
+| RF-024..026 (Mermas/gasto) | RN-029..033 | `waste_event`, `variable_expense` | Etapa 3 → backend/esquema; Etapa 4 → COMPLETO (pantalla PWA) | Etapa 3 (backend) **→** Etapa 4 (completo) | Integración backend (Etapa 3) + E2E con foto (Etapa 4) |
 | RF-027..032 (Importación ventas) | RN-034..041 | `import_batch`, `sale_line` | Importador de ventas | Etapa 5 | Integración (idempotencia, Canje, sin-matchear) |
 | RF-033..035 (BOM/consumo) | RN-020..024 | `bom`, `bom_line`, `inventory_movement` (BOM_CONSUMPTION) | Catálogo + Importador de ventas | Etapa 2 y 5 | Integración (venta → consumo correcto) |
 | RF-036..039 (Ingresos/factura) | RN-042..045 | `purchase_receipt`(+línea), `supplier` | App depósito | Etapa 8 | Integración (matching de factura) |
@@ -1276,6 +1358,7 @@ flowchart LR
 | RF-044..049 (Cierre semanal) | RN-049..053 | `weekly_closing`, checklist, `inventory_snapshot` | Cierre semanal | Etapa 6 | Integración (máquina de estados) + E2E (checklist completo) |
 | RF-050..054 (Caja/MP) | RN-054..056 | `cash_closing`, `mp_settlement_line` | Caja | Etapa 7 | Integración (idempotencia MP) |
 | RF-055..060 (Roles/auditoría/dashboard) | RN-057..063 | `role`, `app_user`, `audit_log` | Core | Etapa 1 | Unitaria (autorización) + integración (auditoría por acción) |
+| R-002 (mejora opcional: import catálogo Grido + BOM asistido) | RN-005, RN-021 | `product`, `bom` | Catálogo | Etapa 2, sólo si se aprueba | No aplica hasta aprobación — no es requisito |
 
 ---
 
@@ -1283,15 +1366,16 @@ flowchart LR
 
 Consolidado de la sección 22, priorizado por si bloquean o no el arranque de Etapa 1:
 
-**Bloqueante para Etapa 1 (no para Etapa 0):**
-- **P-001** — Modelo de identidad: ¿cuenta individual por persona o PIN compartido por rol/ubicación?
+**🔴 BLOQUEANTE para Etapa 1 (no para la aprobación de Etapa 0):**
+- **P-001** — Cómo se identifica realmente cada persona al usar el sistema (individual vs. dispositivo/rol compartido, y qué tan rápido necesita ser el ingreso) — pregunta reformulada en la sección 22 para que la responda alguien no técnico. Sin esto, Etapa 1 (Auth) no puede diseñarse sin inventar una regla de negocio.
 
 **No bloqueantes, pero conviene resolver antes de la etapa que se indica:**
 - **P-006** — Nombre/lista real de ubicaciones (antes de Etapa 1, para el seed de datos).
-- **P-002** — Umbrales de reconteo cerrado vs. granel (antes de Etapa 3).
+- **P-002** — Umbrales de reconteo cerrado vs. granel (no bloquea Etapa 3 en sí; sí bloquea activar el disparo automático de reconteo en producción, Etapa 3/4).
 - **P-007** — Mapeo campo a campo de la planilla de papel real (antes de Etapa 4, ideal: antes también).
+- **P-009** — Política de corrección/anulación de bajas de lata (antes de fijar la política final en Etapa 4; no bloquea construir la pantalla).
 - **P-004** — Formato real del insumo de Mercado Pago que usará el Admin (antes de Etapa 7).
-- **P-005** — Si Encargado de depósito puede registrar mermas de depósito (puede diferirse, valor por defecto = no, como en el prototipo).
+- **P-005** — Si Encargado de depósito puede registrar mermas de depósito (puede diferirse; mientras tanto se mantiene la restricción ya evidenciada en el prototipo actual).
 - **P-003** — Confirmación de stack del socio programador (afecta velocidad, no arquitectura).
 - **P-008** — FIFO al transferir entre ubicaciones (Hito 1b/2, no bloquea nada de este plan).
 
@@ -1301,8 +1385,8 @@ Consolidado de la sección 22, priorizado por si bloquean o no el arranque de Et
 
 ## **B — LISTO PARA COMENZAR PARCIALMENTE, CON PENDIENTES NO BLOQUEANTES**
 
-**Por qué no es A**: existe una única decisión (**P-001**, modelo de identidad/autenticación) que sí condiciona el diseño concreto de la Etapa 1 (esquema de `app_user`, UX de login, granularidad real de auditoría) y que este informe no puede resolver por sí mismo sin suponer — el material entregado documenta ambos modelos como técnicamente viables (el prototipo usa PIN compartido; el documento de requisitos exige auditoría "con usuario" sin especificar si es individual) y decidir por el cliente violaría la regla explícita de "preguntá, no supongas".
+**Por qué no es A**: existe una única decisión **BLOQUEANTE** (**P-001**, cómo se identifica realmente cada persona al usar el sistema) que condiciona el diseño concreto de la Etapa 1 (esquema de `app_user`, cuál de las tres alternativas de la sección 18.2 se implementa, granularidad real de la auditoría) y que este informe no puede resolver por sí mismo sin inventar una regla de negocio — el material entregado documenta varios modelos como técnicamente viables (el prototipo usa PIN compartido; el documento de requisitos exige auditoría "con usuario" sin especificar si es individual) y decidir por el cliente violaría la regla explícita de "preguntá, no supongas". La revisión de Etapa 0.1 reformuló esta pregunta en términos que no requieren conocimiento técnico para responderla (sección 22) y confirmó que sigue siendo la única decisión de este tipo en todo el informe.
 
-**Por qué no es C**: **ninguna otra decisión de este informe está bloqueada**. El documento de requisitos del cliente es inusualmente completo y ya resuelve explícitamente el 90% de las ambigüedades típicas de una Etapa 0 (alcance por hitos, roles, reglas de negocio del ledger, formato conceptual de importaciones, criterios de aceptación). El resto del material (sistema actual + archivos reales) permitió **confirmar por evidencia** varias preguntas que el propio cliente había dejado abiertas (en particular, el formato real del export de ventas). El modelo de datos, el ledger de inventario, la estrategia de importaciones, el BOM, el cierre semanal, la arquitectura y el plan de etapas están completamente especificados y pueden aprobarse tal como están.
+**Por qué no es C**: **ninguna otra decisión de este informe está bloqueada**. El documento de requisitos del cliente es inusualmente completo y ya resuelve explícitamente el 90% de las ambigüedades típicas de una Etapa 0 (alcance por hitos, roles, reglas de negocio del ledger, formato conceptual de importaciones, criterios de aceptación). El resto del material (sistema actual + archivos reales) permitió **confirmar por evidencia** varias preguntas que el propio cliente había dejado abiertas (en particular, el formato real del export de ventas). La revisión de Etapa 0.1 agregó una segunda pregunta no bloqueante (**P-009**, política de corrección de bajas de lata) y retiró un ítem que en la v1.0 aparecía incorrectamente como requisito obligatorio (RF-008, reclasificado como recomendación R-002) — ninguna de las dos correcciones cambia el veredicto: siguen sin existir decisiones bloqueantes fuera de P-001. El modelo de datos, el ledger de inventario, la estrategia de importaciones, el BOM, el cierre semanal, la arquitectura, la decisión de ORM/migraciones y el plan de etapas (ahora con límites claros entre Etapa 3 y Etapa 4) están completamente especificados y pueden aprobarse tal como están.
 
-**Recomendación concreta**: aprobar este informe, resolver P-001 con el cliente (una sola pregunta, de decisión rápida), y arrancar Etapa 1 con el resto de los pendientes (P-002 a P-008) corriendo en paralelo sin bloquear el desarrollo, cada uno resuelto antes de la etapa que efectivamente lo necesita.
+**Recomendación concreta**: aprobar este informe, resolver P-001 con el cliente (una sola pregunta, formulada en términos operativos, no técnicos — sección 22), y arrancar Etapa 1 con el resto de los pendientes (P-002 a P-009) corriendo en paralelo sin bloquear el desarrollo, cada uno resuelto antes de la etapa que efectivamente lo necesita.
