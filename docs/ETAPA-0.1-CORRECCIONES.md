@@ -4,6 +4,8 @@
 Fecha: 2026-09-02 · Autor: Claude (arquitecto de software) · Alcance: exclusivamente correctivo. No se escribió código, no se generó frontend/backend, no se crearon migraciones, no se configuró Supabase/Vercel/Render, y no se avanzó a Etapa 1.
 
 > Este documento registra **qué cambió en el informe de Etapa 0 y por qué**, a pedido explícito de una revisión crítica del cliente. El informe corregido queda en `docs/ETAPA-0-ANALISIS-ARQUITECTURA.md` (versión 1.1). Este archivo es el registro de la corrección, no lo reemplaza.
+>
+> **Addendum (Etapa 1, sin modificar lo de arriba)**: la pregunta bloqueante **P-001** que este documento discute en las secciones 5, 6, 8 y 9 quedó **RESUELTA** al encargarse la Etapa 1 — el cliente confirmó identidad individual por persona (Opción A de la sección 18.2 del informe, ahora v1.2). El detalle de la resolución está en `docs/ETAPA-0-ANALISIS-ARQUITECTURA.md` (v1.2) y en `docs/ETAPA-1-BASE-CORE.md`. Se deja este documento sin reescribir porque es el registro histórico de la corrección de Etapa 0.1, tal como pide su propio encabezado.
 
 ---
 

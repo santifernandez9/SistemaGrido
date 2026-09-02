@@ -1,9 +1,9 @@
 # ETAPA 0 — Análisis, Arquitectura y Plan Maestro
 ### Sistema de Control de Stock, Caja y Rentabilidad para Heladerías Grido (Heladerías Habash)
 
-Versión: 1.1 (corregida en Etapa 0.1) · Fecha original: 2026-09-02 · Autor: Claude (arquitecto de software, a pedido del socio programador)
+Versión: 1.2 (P-001 resuelta al iniciar Etapa 1) · Fecha original: 2026-09-02 · Autor: Claude (arquitecto de software, a pedido del socio programador)
 
-> **Nota de versión**: este documento fue corregido puntualmente en la Etapa 0.1 a partir de una revisión crítica del cliente. El detalle completo de qué cambió, por qué, y qué supuestos se eliminaron está en `docs/ETAPA-0.1-CORRECCIONES.md`. Esta versión (1.1) reemplaza a la 1.0 como documento vigente; no se reescribió nada que no estuviera directamente señalado por la corrección.
+> **Nota de versión**: este documento fue corregido puntualmente en la Etapa 0.1 (v1.1, ver `docs/ETAPA-0.1-CORRECCIONES.md`) y actualizado nuevamente en v1.2 para registrar que el cliente resolvió la pregunta bloqueante **P-001** al encargar la Etapa 1: **cada persona tendrá usuario individual — Opción A de la sección 18.2 (identidad individual real)**. No se reescribió ninguna otra sección; el resto del documento sigue vigente tal como quedó en v1.1.
 
 > **Alcance de este documento**: análisis integral, arquitectura propuesta, modelo de datos, estrategia técnica y plan de implementación por etapas. **No contiene código, migraciones definitivas ni implementación.** Todo lo aquí escrito se deriva del material entregado por el cliente (ZIP `sistema_grido.zip`) y está clasificado explícitamente según su origen (confirmado, evidencia del sistema actual, recomendación, supuesto, pendiente o futuro), tal como exige el encargo.
 
@@ -38,7 +38,9 @@ El cliente (Nabil Habash, franquiciado Grido) necesita reemplazar una operación
 
 El material entregado es inusualmente completo para una Etapa 0: no sólo hay un documento de requisitos ya estructurado, sino un **sistema previo funcional completo** (backend + frontend) que ya resuelve, con distinto grado de madurez, buena parte del núcleo pedido (ledger de movimientos, importación de ventas con detección de duplicados por hash, BOM con descuento automático de insumos, mermas con foto, bajas de lata, caja semanal con parseo de Mercado Pago, auditoría, backups, chequeos de integridad). Este prototipo **no se voltea ni se ignora**: se trata como el mejor punto de partida disponible para validar reglas de negocio y como fuente de datos de referencia (catálogo semilla de ~160 productos, mapeos de alias ya cargados, 181 líneas de BOM ya relevadas). Al mismo tiempo, tiene limitaciones estructurales serias para escalar a Hito 2 (autenticación por PIN compartido sin identidad individual, ausencia de `organization_id`, ausencia de transacciones atómicas reales, Google Sheets como motor de datos) que **no deben heredarse**.
 
-**Veredicto de esta etapa: B — Listo para comenzar parcialmente, con una decisión BLOQUEANTE para el inicio de Etapa 1 (P-001, modelo real de identidad/acceso — sección 22) que el cliente debe resolver antes de que arranque el desarrollo, aunque no bloquea la aprobación de este informe** — ver sección 27.
+**Veredicto de esta etapa (v1.2): A — Listo para comenzar desarrollo** — ver sección 27. (En v1.0/v1.1 el veredicto era B, por una única decisión bloqueante — P-001 — que condicionaba el diseño de Auth de Etapa 1.)
+
+> **Actualización v1.2 — P-001 RESUELTA**: al encargar la Etapa 1, el cliente resolvió P-001 explícitamente: **cada persona que use el sistema tiene su propio usuario individual** (Opción A de la sección 18.2). No se usan cuentas compartidas por sucursal/rol como modelo principal de identidad. Las operaciones relevantes quedan asociadas al usuario real que las ejecutó (`created_by_user_id` o equivalente), para sostener auditoría, trazabilidad, identificación de responsables e historial de acciones. Esta decisión ya está incorporada en el modelo de `app_user` (sección 10.1) y en la Etapa 1 del plan maestro (sección 23).
 
 ---
 
@@ -310,7 +312,7 @@ Prioridad: **P1** = núcleo Hito 1 (obligatorio antes de noviembre 2026), **P2**
 | **Sistema / Importador** (actor técnico) | Ejecutar importaciones, generar movimientos `BOM_CONSUMPTION`, calcular teórico/diferencias, generar snapshots | Todos los módulos transaccionales, sin UI propia | Crear movimientos derivados, nunca decide justificaciones ni cierra semanas | Toda decisión de negocio (justificar, cerrar, confirmar factura) requiere un actor humano | — | RESPALDADO (necesario para RN-023, RN-042, RN-053) |
 | **Super Admin** (futuro, multi-organización) | Alta de organizaciones/franquiciados, soporte, facturación | Todo, entre organizaciones | — | — | — | FUERA DE ALCANCE / FUTURO — sólo se modela la jerarquía (Doc §5), no se construye |
 
-**PENDIENTE DE DEFINICIÓN Y BLOQUEANTE PARA EL DISEÑO CONCRETO DE ETAPA 1** (no bloqueante para el modelo de roles en sí, que queda tal como está arriba — sí para cómo se autentica cada rol; ver sección 18 y **P-001** en la sección 22): si cada Empleada/Encargado se identifica individualmente ante cada operación, o si varias personas comparten un mismo acceso/dispositivo sin distinguirse entre sí, como ocurre hoy con el PIN compartido del sistema actual.
+**RESUELTO (P-001, v1.2)**: cada Empleada/Encargado/Admin se identifica **individualmente** con su propio usuario — no se comparte un acceso/dispositivo sin distinguir a la persona. Ver sección 18 (Opción A elegida) y la fila P-001 en la sección 22.
 
 ---
 
@@ -521,8 +523,8 @@ role(id PK, code CHECK IN ('ADMIN','DEPOSIT_MANAGER','SHOP_EMPLOYEE'), name)
 
 app_user(id PK, organization_id FK, role_id FK, default_location_id FK NULL,
          display_name, auth_subject TEXT UNIQUE, active BOOLEAN DEFAULT true, created_at)
-  -- auth_subject: id de Supabase Auth. El significado exacto de este campo (¿una fila por
-  -- persona, o una fila por rol/ubicación compartida?) depende de P-001 — ver sección 18.2.
+  -- auth_subject: id de Supabase Auth. Resuelto P-001 (v1.2, sección 18.2, Opción A):
+  -- una fila de app_user = una persona física con cuenta individual propia.
 ```
 
 ### 10.2 Catálogo
@@ -1012,39 +1014,39 @@ La dirección tecnológica del cliente (React + TypeScript + PWA + Vercel / Node
 
 ## 18. Seguridad
 
-Esta sección separa explícitamente cuatro conceptos que suelen mezclarse cuando se habla de "cómo entra la gente al sistema", precisamente porque esa mezcla es lo que llevaría a elegir una solución de autenticación sin base real: **la elección concreta depende de una pregunta funcional que el cliente todavía no respondió (P-001, sección 22), y este informe no la responde por él.**
+Esta sección separaba cuatro conceptos que suelen mezclarse cuando se habla de "cómo entra la gente al sistema". **Actualización v1.2 — P-001 RESUELTA**: el cliente confirmó, al encargar la Etapa 1, que cada persona tiene su propio usuario individual. La sección 18.2 queda como registro de las alternativas evaluadas y de **cuál se eligió y por qué**; ya no es una decisión abierta.
 
 ### 18.1 Cuatro conceptos distintos
 
 | Concepto | Pregunta que responde | Estado en este informe |
 |---|---|---|
-| **Identidad** | ¿Quién realizó realmente una operación? | **Depende de P-001**: puede ser una persona física identificada individualmente, o un rol/ubicación compartido sin distinguir la persona dentro de él. |
-| **Autenticación** | ¿Cómo demuestra el usuario (o el dispositivo/rol) quién es? | Supabase Auth, en cualquiera de los modelos de identidad que P-001 determine — ver 18.2. |
-| **Autorización** | ¿Qué puede hacer, una vez identificado? | Middleware de la API basado en rol + ubicación (sección 7). **No depende de P-001** — es la misma independientemente de cómo se resuelva la identidad. |
-| **UX operativa** | ¿Cómo se logra acceso rápido en una heladería sin destruir trazabilidad ni seguridad? | Tensión explícita a resolver junto con P-001: cuanto más individual es la identidad, más lento tiende a ser el ingreso; cuanto más compartida, más rápido pero con menos trazabilidad real por persona. |
+| **Identidad** | ¿Quién realizó realmente una operación? | **Resuelto (P-001, Opción A)**: cada persona física tiene identidad individual propia — nunca un rol/ubicación compartido sin distinguir a la persona. |
+| **Autenticación** | ¿Cómo demuestra el usuario quién es? | Supabase Auth, con una cuenta por persona — ver 18.2. |
+| **Autorización** | ¿Qué puede hacer, una vez identificado? | Middleware de la API basado en rol + ubicación (sección 7). Independiente de la elección de identidad. |
+| **UX operativa** | ¿Cómo se logra acceso rápido en una heladería sin destruir trazabilidad ni seguridad? | Se acepta el costo de fricción de la Opción A (login individual) a cambio de trazabilidad real; se mitiga con sesión persistente por dispositivo (RNF-001, sección 18.3). |
 
-### 18.2 Alternativas técnicamente válidas para Identidad + Autenticación (ninguna elegida todavía)
+### 18.2 Alternativas evaluadas — Opción A (identidad individual real) ELEGIDA
 
-Las tres son implementables sobre Supabase Auth y difieren en qué queda registrado como "quién hizo la operación" y en la fricción de login. **Ninguna usa un PIN corto como si fuera la contraseña convencional de una cuenta de Supabase Auth**: un PIN de 4 dígitos no tiene la entropía necesaria para funcionar de forma segura como credencial criptográfica por sí solo, y además, si es compartido, elimina la posibilidad de distinguir personas — que es justamente lo que la auditoría del documento del cliente (RN-060) necesita.
+Las tres alternativas siguientes son técnicamente válidas sobre Supabase Auth y se evaluaron en la Etapa 0 sin elegir ninguna, a la espera de P-001. **El cliente resolvió P-001 al encargar la Etapa 1: se implementa la Opción A.** Se documentan las tres para dejar registro de por qué se descartaron B y C, no porque sigan abiertas.
 
-- **Opción A — Identidad individual real**: cada Empleada/Encargado tiene su propia cuenta en Supabase Auth. La auditoría queda atribuida siempre a la persona real. Requiere dar de alta a cada empleado y un login algo más lento, salvo que se combine con sesión persistente por dispositivo para no pedir credenciales en cada turno.
-- **Opción B — Cuenta técnica por rol/ubicación + selección de responsable**: el dispositivo de cada local se autentica una sola vez con una cuenta técnica de Supabase Auth (una por rol/ubicación, con contraseña robusta que las empleadas no necesitan conocer ni tipear — la gestiona el Admin). Dentro de esa sesión ya autenticada, cada operación pide elegir o escribir el nombre de quien la está haciendo; ese nombre queda en la auditoría como dato operativo, no como credencial. Login rápido (una vez por dispositivo/turno); trazabilidad parcial, sujeta a que la persona elija bien su nombre.
-- **Opción C — Híbrido, PIN corto como capa de UX sobre una sesión ya autenticada**: igual que la Opción B, pero en vez de elegir un nombre de una lista, cada persona tiene un PIN corto **individual** (no compartido) que sólo sirve para identificarse rápido dentro de una sesión de dispositivo ya autenticada por Supabase Auth — el PIN nunca es en sí mismo la credencial de Supabase Auth. Mantiene una velocidad de ingreso cercana a la actual, con trazabilidad individual real.
+- ✅ **Opción A — Identidad individual real (ELEGIDA)**: cada Empleada/Encargado/Admin tiene su propia cuenta en Supabase Auth. La auditoría queda atribuida siempre a la persona real. Requiere dar de alta a cada persona (el Admin la invita desde el sistema — sección de Autenticación de `docs/ETAPA-1-BASE-CORE.md`) y un login por persona, mitigado con sesión persistente por dispositivo para no pedir credenciales en cada turno (RNF-001).
+- ❌ **Opción B — Cuenta técnica por rol/ubicación + selección de responsable**: descartada — no cumple el requisito explícito del cliente de que las operaciones queden asociadas al usuario real que las ejecutó, ya que la identidad quedaría en un campo de texto libre, no en una cuenta autenticada.
+- ❌ **Opción C — Híbrido, PIN corto como capa de UX**: descartada por la misma decisión del cliente — no hace falta la capa intermedia de PIN si cada persona ya tiene su propia cuenta.
 
-La elección entre estas opciones (o una variante) depende de cómo trabaja realmente el negocio hoy: cuántos dispositivos hay por local, si conviene saber siempre quién hizo cada carga o alcanza con saber el local, y qué tan rápido necesita ser el ingreso. **Esa es exactamente la pregunta reformulada como P-001 en la sección 22** — este informe no elige entre A, B o C porque hacerlo sin esa respuesta sería convertir una decisión de negocio en un supuesto técnico.
+En ningún caso se usa un PIN corto como si fuera la contraseña convencional de una cuenta de Supabase Auth — eso queda descartado independientemente de la opción, tal como se estableció en la Etapa 0.1.
 
-### 18.3 Lo que no depende de P-001
+### 18.3 Consecuencias de la Opción A (ya no dependen de P-001)
 
 - **Autorización**: middleware por rol + ubicación en cada endpoint de la API (nunca sólo en el frontend), replicando el principio ya aplicado hoy (`soloAdmin_()` en cada acción) pero de forma centralizada y testeable, no repetida acción por acción.
 - **Roles**: `ADMIN`, `DEPOSIT_MANAGER`, `SHOP_EMPLOYEE` (sección 7); `SUPER_ADMIN` modelado para Hito 2, sin uso en Hito 1.
 - **Validación**: Zod en el borde de la API — todo payload de escritura se valida antes de tocar la capa de dominio.
 - **Archivos**: validación de tipo MIME real (no sólo extensión), límite de tamaño, cuarentena del archivo original en Storage antes de procesar (permite reprocesar/auditar una importación fallida sin pedir el archivo de nuevo).
 - **Endpoints**: HTTPS obligatorio (Render + Vercel lo dan por defecto), CORS restringido a los dominios de las dos apps.
-- **Sesiones/tokens**: JWT de Supabase Auth con expiración + refresh; en la PWA, persistencia de sesión por dispositivo para minimizar fricción de reingreso en el local (RNF-001) — el detalle exacto de qué queda persistido (una sesión de dispositivo vs. una sesión por persona) depende de la opción elegida en 18.2.
-- **Secretos**: variables de entorno en Render/Vercel/Supabase, nunca en el repositorio; el sistema actual guarda un PIN en texto plano en una hoja de cálculo — **esto no se replica** en el nuevo sistema bajo ninguna circunstancia, sea cual sea la opción elegida en 18.2.
+- **Sesiones/tokens**: JWT de Supabase Auth con expiración + refresh; en la PWA, persistencia de la sesión de la persona por dispositivo para minimizar fricción de reingreso en el local (RNF-001) — sigue siendo una sesión individual, no de dispositivo/rol.
+- **Secretos**: variables de entorno en Render/Vercel/Supabase, nunca en el repositorio; el sistema actual guarda un PIN en texto plano en una hoja de cálculo — **esto no se replica** en el nuevo sistema bajo ninguna circunstancia.
 - **Logs**: separar logs de aplicación (Pino/Sentry) de auditoría de negocio (`audit_log` en Postgres) — no mezclar ambos.
-- **Rate limiting**: límite básico por IP/dispositivo en endpoints de login e importación — más importante cuanto más se acerque la solución elegida a la Opción B/C (una cuenta técnica compartida por local es un blanco más atractivo de fuerza bruta que cuentas individuales).
-- **Auditoría**: sección 15 — es en sí misma un control de seguridad (trazabilidad de quién hizo qué); su granularidad real (persona vs. rol/ubicación) depende de la opción elegida en 18.2.
+- **Rate limiting**: límite básico por IP/usuario en endpoints de login e importación.
+- **Auditoría**: sección 15 — es en sí misma un control de seguridad (trazabilidad de quién hizo qué); con la Opción A, la granularidad es siempre por persona real, nunca por rol/ubicación compartido.
 
 ---
 
@@ -1114,7 +1116,7 @@ Esta separación es exactamente la que pide el documento del cliente (§0.1: "se
 
 | ID | Pregunta concreta | Por qué se necesita | Qué afecta | ¿Bloquea arquitectura? | ¿Bloquea desarrollo? | Etapa máxima sin resolverla |
 |---|---|---|---|---|---|---|
-| P-001 | 🔴 **BLOQUEANTE.** Reformulada en Etapa 0.1 para que la pueda responder una persona no técnica (ver razón en `docs/ETAPA-0.1-CORRECCIONES.md`): Cuando una Empleada de heladería o el Encargado de depósito usan el sistema — **(a)** ¿cada persona se identifica individualmente (con su nombre/usuario propio) antes de cargar algo, o varias personas comparten el mismo acceso/dispositivo sin distinguirse entre sí? **(b)** ¿hay un celular/tablet por persona, o uno solo compartido por local? **(c)** si es compartido: cuando después hay que preguntar "¿quién cargó esto?" (por ejemplo, ante una diferencia de stock), ¿necesitan poder saber exactamente qué persona lo hizo, o alcanza con saber que fue "alguien de tal heladería"? **(d)** ¿el ingreso al sistema tiene que ser lo más rápido posible (unos segundos, como hoy con el PIN), aunque eso signifique no saber la persona exacta, o puede tomar un poco más si eso permite identificarla? | Determina el modelo de `app_user` (sección 10.1), qué tan individual es la auditoría real (RN-060), y el diseño de UX de login (sección 18.2 — tres alternativas técnicas presentadas, ninguna elegida). | Modelo de datos (`app_user`), Auth (Supabase), UX de login, granularidad de la auditoría | **Sí, para el diseño concreto de Etapa 1** — el esquema puede prepararse para soportar cualquier respuesta sin romperse, pero el flujo de Auth en sí no puede construirse sin esta respuesta. | No bloquea la aprobación de Etapa 0, **sí bloquea el inicio de Etapa 1**. | **Etapa 0.** Debe resolverse antes de iniciar Etapa 1 — no se avanza con Auth sin esta respuesta. |
+| P-001 | ✅ **RESUELTO (v1.2, al encargar Etapa 1)**. Pregunta original (reformulada en Etapa 0.1 para que la pudiera responder una persona no técnica): cuando una Empleada de heladería o el Encargado de depósito usan el sistema, ¿cada persona se identifica individualmente o comparten un mismo acceso/dispositivo? **Respuesta del cliente: cada persona tiene su propio usuario individual.** No se usan cuentas compartidas por sucursal/rol como modelo principal de identidad. Las operaciones relevantes quedan asociadas al usuario real que las ejecutó (`created_by_user_id` o equivalente). | Determina el modelo de `app_user` (sección 10.1) — ya implementado con esta decisión —, la granularidad de la auditoría (RN-060, ahora siempre por persona) y el flujo de Auth de Etapa 1 (Opción A de la sección 18.2). | Modelo de datos (`app_user`), Auth (Supabase), UX de login, granularidad de la auditoría | Ya no aplica — resuelto. | Ya no aplica — resuelto. | **Resuelto antes de iniciar Etapa 1**, tal como exigía este mismo informe. |
 | P-002 | ¿Qué umbral concreto de diferencia dispara un reconteo para producto cerrado, y cuál para helado a granel (fracción estimada)? | Sin el valor, el diseño (RN-014) queda correcto conceptualmente pero no implementable. Corregido en Etapa 0.1: **no se propone ningún valor por defecto** — un porcentaje, cantidad o tolerancia inventada sería una regla de negocio no confirmada. | Motor de inventario (Etapa 3), UX de conteo (Etapa 4) | No — el campo se diseña configurable, sin ningún valor asignado. | **Parcialmente**: no bloquea construir el ledger, el cálculo de teórico/diferencia ni el resto de Etapa 3; **sí bloquea activar en producción el disparo automático de reconteo** (Etapa 3/4) hasta contar con el número real. | Etapa 3 puede completarse por entero sin este valor (ver sección 23); lo único que queda pendiente de activar es el disparo automático de reconteo. |
 | P-003 | ¿El socio programador tiene experiencia real con PostgreSQL/Supabase y React/PWA, o conviene ajustar el stack? (pregunta ya planteada por el propio cliente, Doc Anexo B) | Es la decisión de mayor impacto en si se llega al timeline de noviembre 2026, según el propio documento. | Stack (sección 17), timeline | No (la dirección tecnológica ya está confirmada por el cliente como punto de partida) | No, pero condiciona la velocidad real de Etapas 1 en adelante | No bloquea ninguna etapa de este informe; es una decisión de equipo, no de arquitectura |
 | P-004 | ¿Cuál es el insumo real que el Admin va a usar cada semana para el cierre de Mercado Pago: el PDF/impresión del email, un export CSV/XLSX del panel de MP, o pegar el texto del email? | Determina el parser concreto del importador de caja (sección 12.2). | Importador de Mercado Pago (Etapa 7) | No | Sí, para construir el importador específico | Etapa 6 (puede diseñarse el resto del cierre semanal sin esto) |
@@ -1366,8 +1368,8 @@ flowchart LR
 
 Consolidado de la sección 22, priorizado por si bloquean o no el arranque de Etapa 1:
 
-**🔴 BLOQUEANTE para Etapa 1 (no para la aprobación de Etapa 0):**
-- **P-001** — Cómo se identifica realmente cada persona al usar el sistema (individual vs. dispositivo/rol compartido, y qué tan rápido necesita ser el ingreso) — pregunta reformulada en la sección 22 para que la responda alguien no técnico. Sin esto, Etapa 1 (Auth) no puede diseñarse sin inventar una regla de negocio.
+**✅ Ya resuelta (era bloqueante para Etapa 1):**
+- **P-001** — Identidad individual por persona, confirmada por el cliente al encargar la Etapa 1. Ver sección 22.
 
 **No bloqueantes, pero conviene resolver antes de la etapa que se indica:**
 - **P-006** — Nombre/lista real de ubicaciones (antes de Etapa 1, para el seed de datos).
@@ -1383,10 +1385,10 @@ Consolidado de la sección 22, priorizado por si bloquean o no el arranque de Et
 
 ## 27. Veredicto final
 
-## **B — LISTO PARA COMENZAR PARCIALMENTE, CON PENDIENTES NO BLOQUEANTES**
+## **A — LISTO PARA COMENZAR DESARROLLO (a partir de v1.2)**
 
-**Por qué no es A**: existe una única decisión **BLOQUEANTE** (**P-001**, cómo se identifica realmente cada persona al usar el sistema) que condiciona el diseño concreto de la Etapa 1 (esquema de `app_user`, cuál de las tres alternativas de la sección 18.2 se implementa, granularidad real de la auditoría) y que este informe no puede resolver por sí mismo sin inventar una regla de negocio — el material entregado documenta varios modelos como técnicamente viables (el prototipo usa PIN compartido; el documento de requisitos exige auditoría "con usuario" sin especificar si es individual) y decidir por el cliente violaría la regla explícita de "preguntá, no supongas". La revisión de Etapa 0.1 reformuló esta pregunta en términos que no requieren conocimiento técnico para responderla (sección 22) y confirmó que sigue siendo la única decisión de este tipo en todo el informe.
+**Actualización v1.2**: la única decisión bloqueante del informe (**P-001**) quedó **resuelta** al encargarse la Etapa 1 — cada persona tiene usuario individual (Opción A de la sección 18.2). El veredicto pasa de B a **A**: ya no existen decisiones bloqueantes pendientes para iniciar el desarrollo.
 
-**Por qué no es C**: **ninguna otra decisión de este informe está bloqueada**. El documento de requisitos del cliente es inusualmente completo y ya resuelve explícitamente el 90% de las ambigüedades típicas de una Etapa 0 (alcance por hitos, roles, reglas de negocio del ledger, formato conceptual de importaciones, criterios de aceptación). El resto del material (sistema actual + archivos reales) permitió **confirmar por evidencia** varias preguntas que el propio cliente había dejado abiertas (en particular, el formato real del export de ventas). La revisión de Etapa 0.1 agregó una segunda pregunta no bloqueante (**P-009**, política de corrección de bajas de lata) y retiró un ítem que en la v1.0 aparecía incorrectamente como requisito obligatorio (RF-008, reclasificado como recomendación R-002) — ninguna de las dos correcciones cambia el veredicto: siguen sin existir decisiones bloqueantes fuera de P-001. El modelo de datos, el ledger de inventario, la estrategia de importaciones, el BOM, el cierre semanal, la arquitectura, la decisión de ORM/migraciones y el plan de etapas (ahora con límites claros entre Etapa 3 y Etapa 4) están completamente especificados y pueden aprobarse tal como están.
+**Por qué no es C**: **ninguna decisión de este informe está bloqueada**. El documento de requisitos del cliente es inusualmente completo y ya resuelve explícitamente el 90% de las ambigüedades típicas de una Etapa 0 (alcance por hitos, roles, reglas de negocio del ledger, formato conceptual de importaciones, criterios de aceptación). El resto del material (sistema actual + archivos reales) permitió **confirmar por evidencia** varias preguntas que el propio cliente había dejado abiertas (en particular, el formato real del export de ventas). La revisión de Etapa 0.1 agregó una pregunta no bloqueante (**P-009**, política de corrección de bajas de lata) y retiró un ítem que en la v1.0 aparecía incorrectamente como requisito obligatorio (RF-008, reclasificado como recomendación R-002). El modelo de datos, el ledger de inventario, la estrategia de importaciones, el BOM, el cierre semanal, la arquitectura, la decisión de ORM/migraciones y el plan de etapas (con límites claros entre Etapa 3 y Etapa 4) están completamente especificados.
 
-**Recomendación concreta**: aprobar este informe, resolver P-001 con el cliente (una sola pregunta, formulada en términos operativos, no técnicos — sección 22), y arrancar Etapa 1 con el resto de los pendientes (P-002 a P-009) corriendo en paralelo sin bloquear el desarrollo, cada uno resuelto antes de la etapa que efectivamente lo necesita.
+**Recomendación concreta**: avanzar con Etapa 1 (Base/Core) implementando el modelo de identidad individual (P-001) tal como quedó definido. El resto de los pendientes (P-002 a P-009) siguen sin bloquear nada de este plan y se resuelven cada uno antes de la etapa que efectivamente los necesita — ninguno afecta a Etapa 1.
