@@ -5,11 +5,15 @@ Sistema de control de stock, caja y rentabilidad para Heladerías Grido
 administración y app operativa PWA para heladería/depósito) y paquetes
 compartidos.
 
-> Este repositorio está en **Etapa 2 — Catálogo y Maestros**: además de la base
-> técnica (auth, usuarios, roles, auditoría), ya tiene el módulo de catálogo
-> (Productos, Categorías, Sabores) con datos reales del cliente importados.
-> Todavía no implementa el motor de inventario (stock, ventas, caja, mermas,
-> etc.) — ver [`docs/ETAPA-2-CATALOGO-MAESTROS.md`](docs/ETAPA-2-CATALOGO-MAESTROS.md)
+> Este repositorio está en **Etapa 2.1 — Integridad multi-organización en
+> catálogo**: además de la base técnica (auth, usuarios, roles, auditoría) y
+> el módulo de catálogo (Productos, Categorías, Sabores) con datos reales del
+> cliente importados, las relaciones del catálogo entre sí quedan protegidas
+> también a nivel de PostgreSQL (no sólo en el backend) contra mezclas entre
+> organizaciones. Todavía no implementa el motor de inventario (stock, ventas,
+> caja, mermas, etc.) — ver
+> [`docs/ETAPA-2-CATALOGO-MAESTROS.md`](docs/ETAPA-2-CATALOGO-MAESTROS.md) y
+> [`docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md`](docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md)
 > para el detalle completo de qué se construyó y qué queda explícitamente
 > pendiente.
 
@@ -21,6 +25,7 @@ compartidos.
 - [`docs/ETAPA-1.1-CORRECCIONES.md`](docs/ETAPA-1.1-CORRECCIONES.md) — correcciones de consistencia organización/ubicación y atomicidad Auth↔app_user.
 - [`docs/ETAPA-2-CATALOGO-MAESTROS.md`](docs/ETAPA-2-CATALOGO-MAESTROS.md) — módulo de catálogo (productos, categorías, sabores), importador inicial, staging.
 - [`docs/ETAPA-2-PRUEBA-MANUAL.md`](docs/ETAPA-2-PRUEBA-MANUAL.md) — checklist para probar el sistema personalmente.
+- [`docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md`](docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md) — foreign keys compuestas para garantizar el aislamiento multi-organización del catálogo a nivel de PostgreSQL.
 
 ## Estructura del monorepo
 
@@ -112,17 +117,22 @@ vincula al sistema — no hay seed de usuarios reales (ver
 
 ## Tests y CI
 
-112 tests (Vitest) en 19 archivos, backend y ambos frontends. Los tests de
-`apps/api` corren contra una base PostgreSQL real (no mockeada). CI en GitHub
+120 tests (Vitest) en 22 archivos, backend y ambos frontends. Los tests de
+`apps/api` corren contra una base PostgreSQL real (no mockeada), incluyendo
+tests de integridad a nivel de base de datos que bypasean la API para
+confirmar el aislamiento multi-organización (Etapa 2.1). CI en GitHub
 Actions (`.github/workflows/ci.yml`): instala, genera y migra la base contra
 un Postgres de servicio, y corre lint, formato, typecheck, tests y build en
 cada push/PR — sin ningún paso de deploy. Ver detalle en
-`docs/ETAPA-1-BASE-CORE.md`, secciones 16 y 17, y
-`docs/ETAPA-2-CATALOGO-MAESTROS.md`, sección 14.
+`docs/ETAPA-1-BASE-CORE.md`, secciones 16 y 17,
+`docs/ETAPA-2-CATALOGO-MAESTROS.md`, sección 14, y
+`docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md`, secciones 9 a 11.
 
 ## Estado del proyecto
 
-Etapa 2 (Catálogo y Maestros) completa, pendiente de auditoría externa antes
-de avanzar a la siguiente etapa. El sistema tiene base técnica, gestión de
-usuarios y catálogo (con el catálogo real del cliente importable); todavía no
-hay motor de inventario (stock, ventas, caja, mermas, cierres, etc.).
+Etapa 2.1 (Integridad multi-organización en catálogo) completa, pendiente de
+auditoría externa antes de avanzar a la siguiente etapa. El sistema tiene base
+técnica, gestión de usuarios y catálogo (con el catálogo real del cliente
+importable), con el aislamiento entre organizaciones garantizado también a
+nivel de PostgreSQL en las relaciones de catálogo; todavía no hay motor de
+inventario (stock, ventas, caja, mermas, cierres, etc.).

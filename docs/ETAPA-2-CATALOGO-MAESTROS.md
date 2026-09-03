@@ -1,6 +1,6 @@
 # ETAPA 2 — Catálogo, Maestros y Primera Versión Visible del Sistema
 
-Versión: 1.0 · Fecha: 2026-09-03 · Autor: Claude (a pedido del socio programador)
+Versión: 1.1 · Fecha: 2026-09-03 · Autor: Claude (a pedido del socio programador)
 Rama: `claude/etapa-2-catalogo-maestros` (derivada del commit aprobado
 `e918636e3fd50f2f8422d910896614b825622c56` de `claude/etapa-1-base-core`)
 
@@ -9,6 +9,14 @@ Rama: `claude/etapa-2-catalogo-maestros` (derivada del commit aprobado
 > primera versión visual/navegable del sistema. No implementa ningún motor de
 > inventario (ledger, conteos, BOM funcional, mermas, caja, cierres, etc.) — ver
 > sección 19, "Limitaciones", y sección 21, "Qué NO se implementó".
+>
+> **Actualización v1.1 (Etapa 2.1)**: las relaciones entre entidades de catálogo
+> (Producto→Categoría/Tipo/Unidad/Sabor, Categoría→Categoría padre), descritas
+> como FK simple en la sección 6 de este documento, pasaron a FK **compuesta**
+> incluyendo `organizationId`, para que PostgreSQL mismo garantice el
+> aislamiento multi-organización (no sólo la validación del backend descrita
+> más abajo). Detalle completo en
+> `docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md`.
 
 ---
 

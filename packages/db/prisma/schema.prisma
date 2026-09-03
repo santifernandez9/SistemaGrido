@@ -198,11 +198,20 @@ model Category {
   updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  parentCategory Category?    @relation("CategoryToSubcategory", fields: [parentCategoryId], references: [id], onDelete: Restrict)
+  /// FK compuesta (organizationId, parentCategoryId) -> Category(organizationId, id):
+  /// garantiza en PostgreSQL que una subcategoría no pueda apuntar a un grupo
+  /// padre de otra organización (Etapa 2.1 — ver
+  /// docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md). Al ser parentCategoryId
+  /// nullable, Postgres no exige la FK cuando es NULL (categoría raíz), que es
+  /// el comportamiento deseado.
+  parentCategory Category?    @relation("CategoryToSubcategory", fields: [organizationId, parentCategoryId], references: [organizationId, id], onDelete: Restrict)
   subcategories  Category[]   @relation("CategoryToSubcategory")
   products       Product[]
 
   @@unique([organizationId, parentCategoryId, name])
+  /// Habilita que otras tablas (Product, la propia Category) referencien esta
+  /// fila con una FK compuesta (organizationId, id) — Etapa 2.1.
+  @@unique([organizationId, id])
   @@index([organizationId])
   @@index([parentCategoryId])
   @@map("category")
@@ -228,6 +237,8 @@ model ProductType {
   products     Product[]
 
   @@unique([organizationId, code])
+  /// Habilita la FK compuesta (organizationId, productTypeId) en Product — Etapa 2.1.
+  @@unique([organizationId, id])
   @@index([organizationId])
   @@map("product_type")
 }
@@ -248,6 +259,8 @@ model UnitOfMeasure {
   products     Product[]
 
   @@unique([organizationId, code])
+  /// Habilita la FK compuesta (organizationId, unitOfMeasureId) en Product — Etapa 2.1.
+  @@unique([organizationId, id])
   @@index([organizationId])
   @@map("unit_of_measure")
 }
@@ -270,6 +283,8 @@ model Flavor {
   products     Product[]
 
   @@unique([organizationId, name])
+  /// Habilita la FK compuesta (organizationId, flavorId) en Product — Etapa 2.1.
+  @@unique([organizationId, id])
   @@index([organizationId])
   @@map("flavor")
 }
@@ -312,10 +327,16 @@ model Product {
   updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
   organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  category      Category      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
-  productType   ProductType   @relation(fields: [productTypeId], references: [id], onDelete: Restrict)
-  unitOfMeasure UnitOfMeasure @relation(fields: [unitOfMeasureId], references: [id], onDelete: Restrict)
-  flavor        Flavor?       @relation(fields: [flavorId], references: [id], onDelete: Restrict)
+  /// FKs compuestas (organizationId, xId) -> Master(organizationId, id) en las
+  /// cuatro relaciones de abajo: garantizan en PostgreSQL que un producto no
+  /// pueda referenciar una categoría/tipo/unidad/sabor de otra organización,
+  /// además de la validación ya existente en el backend (Etapa 2.1 — ver
+  /// docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md). flavorId es nullable:
+  /// Postgres no exige la FK cuando es NULL (producto sin sabor).
+  category      Category      @relation(fields: [organizationId, categoryId], references: [organizationId, id], onDelete: Restrict)
+  productType   ProductType   @relation(fields: [organizationId, productTypeId], references: [organizationId, id], onDelete: Restrict)
+  unitOfMeasure UnitOfMeasure @relation(fields: [organizationId, unitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
+  flavor        Flavor?       @relation(fields: [organizationId, flavorId], references: [organizationId, id], onDelete: Restrict)
 
   @@unique([organizationId, code])
   @@index([organizationId])
