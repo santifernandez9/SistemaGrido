@@ -1,0 +1,43 @@
+{
+  "name": "sistema-grido",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Sistema de control de stock, caja y rentabilidad para heladerias Grido (Heladerias Habash) - monorepo",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "packageManager": "npm@10.9.7",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "overrides": {
+    "deepmerge-ts": "^8.0.2"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "dev:api": "npm run dev --workspace apps/api",
+    "dev:admin": "npm run dev --workspace apps/admin-web",
+    "dev:shop": "npm run dev --workspace apps/shop-pwa",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "db:generate": "npm run generate --workspace packages/db",
+    "db:migrate:dev": "npm run migrate:dev --workspace packages/db",
+    "db:migrate:deploy": "npm run migrate:deploy --workspace packages/db",
+    "db:seed": "npm run seed --workspace packages/db"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@typescript-eslint/eslint-plugin": "^8.19.1",
+    "@typescript-eslint/parser": "^8.19.1",
+    "eslint": "^9.17.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-react-hooks": "5.2.0",
+    "globals": "^17.12.0",
+    "prettier": "^3.4.2",
+    "typescript": "5.9.3"
+  }
+}

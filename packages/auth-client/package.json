@@ -1,0 +1,26 @@
+{
+  "name": "@sistema-grido/auth-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "echo \"(sin tests unitarios propios; ver apps/admin-web y apps/shop-pwa)\" && exit 0"
+  },
+  "dependencies": {
+    "@sistema-grido/shared-types": "*",
+    "@supabase/supabase-js": "^2.114.0"
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-router-dom": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "typescript": "5.9.3"
+  }
+}

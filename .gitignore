@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build output
+dist/
+build/
+.next/
+out/
+
+# Env
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+logs/
+
+# Testing
+coverage/
+
+# Editors / OS
+.DS_Store
+.idea/
+*.swp
+
+# Prisma
+packages/db/generated/
+
+# PWA
+apps/shop-pwa/dev-dist/
+apps/*/dist-ssr/
+
+# Vite
+apps/*/.vite/
+
+# Misc
+*.tsbuildinfo
+.turbo/

@@ -1,0 +1,132 @@
+:root {
+  color-scheme: light;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #f5f6f8;
+  color: #0b1d33;
+}
+
+.app-layout {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  background: #0b1d33;
+  color: #fff;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.app-header .who {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.link-button {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  color: #fff;
+  padding: 8px 14px;
+  border-radius: 8px;
+}
+
+.app-main {
+  padding: 20px 16px 40px;
+  flex: 1;
+}
+
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.login-form {
+  background: #fff;
+  padding: 28px 24px;
+  border-radius: 14px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+  max-width: 380px;
+}
+
+input,
+button {
+  padding: 14px;
+  font-size: 16px;
+  border-radius: 8px;
+  border: 1px solid #ccc;
+}
+
+button {
+  cursor: pointer;
+  background: #0b1d33;
+  color: #fff;
+  border: none;
+  margin-top: 8px;
+  min-height: 48px; /* Tap target grande a propósito: uso con una mano, en el mostrador. */
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.error {
+  color: #b3261e;
+  font-size: 14px;
+}
+
+.muted {
+  color: #667;
+  font-size: 13px;
+}
+
+.error-boundary,
+.auth-loading,
+.auth-forbidden {
+  padding: 40px 20px;
+  text-align: center;
+}
+
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  background: #fff8e6;
+  border-bottom: 1px solid #f0d48a;
+  padding: 10px 16px;
+  font-size: 14px;
+}
+
+.update-banner button {
+  margin-top: 0;
+  min-height: 36px;
+  padding: 6px 12px;
+  font-size: 13px;
+}

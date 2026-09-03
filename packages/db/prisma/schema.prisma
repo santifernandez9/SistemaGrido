@@ -1,0 +1,163 @@
+// Schema Prisma — Núcleo (Etapa 1 / Base-Core)
+//
+// Implementa únicamente las entidades estructurales definidas en
+// docs/ETAPA-0-ANALISIS-ARQUITECTURA.md (sección 10.1, "Núcleo organizacional") y
+// sección 10.9 ("Auditoría"). NO incluye ninguna tabla funcional de etapas
+// posteriores (stock, ventas, mermas, BOM, cierres, caja, etc.) — ver
+// docs/ETAPA-1-BASE-CORE.md, sección "Qué NO se implementó (a propósito)".
+//
+// Convenciones (idénticas a las de Etapa 0, sección 10):
+//   - PK uuid con default aleatorio.
+//   - organization_id NOT NULL en toda entidad operativa (RNF-011).
+//   - created_at en toda tabla; updated_at sólo en catálogos editables in-place.
+//   - Nunca DELETE físico de historial: audit_log es append-only (sin updated_at).
+//   - Nombres de tabla/columna en snake_case en Postgres (vía @map/@@map);
+//     camelCase del lado de Prisma/TypeScript, que es la convención idiomática
+//     del ecosistema y no cambia el DDL real que Etapa 0 especificó.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+/// Roles operativos confirmados por el relevamiento (Etapa 0, sección 7).
+/// SUPER_ADMIN (Hito 2, multi-organización) no se agrega todavía: no está
+/// respaldado como necesidad de Hito 1 y este informe no adelanta etapas futuras.
+enum RoleCode {
+  ADMIN
+  DEPOSIT_MANAGER
+  SHOP_EMPLOYEE
+
+  @@map("role_code")
+}
+
+/// Tipos de ubicación (Etapa 0, sección 5): entidad genérica, no hardcodeada
+/// como "depósito"/"heladería", tal como exige el documento de requisitos del cliente.
+enum LocationType {
+  DEPOT
+  ICE_CREAM_SHOP
+  STORE
+  OTHER
+
+  @@map("location_type")
+}
+
+enum AuditResult {
+  OK
+  ERROR
+  REJECTED
+
+  @@map("audit_result")
+}
+
+model Organization {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  timezone  String   @default("America/Argentina/Cordoba")
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  locations  Location[]
+  users      AppUser[]
+  auditLogs  AuditLog[]
+
+  @@map("organization")
+}
+
+model Location {
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @map("organization_id") @db.Uuid
+  name           String
+  type           LocationType
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  users        AppUser[]
+  auditLogs    AuditLog[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("location")
+}
+
+model Role {
+  id   String   @id @default(uuid()) @db.Uuid
+  code RoleCode @unique
+  name String
+
+  users AppUser[]
+
+  @@map("role")
+}
+
+/// Identidad individual (P-001 RESUELTA — ver docs/ETAPA-0-ANALISIS-ARQUITECTURA.md v1.2,
+/// sección 18.2, Opción A). Una fila = una persona física con cuenta propia en
+/// Supabase Auth. Nunca una cuenta compartida por rol/ubicación como identidad principal.
+model AppUser {
+  id                String    @id @default(uuid()) @db.Uuid
+  organizationId    String    @map("organization_id") @db.Uuid
+  roleId            String    @map("role_id") @db.Uuid
+  /// Ubicación asignada. NULL para ADMIN (acceso a toda la organización) — ver
+  /// docs/ETAPA-0-ANALISIS-ARQUITECTURA.md sección 7 (actores y permisos).
+  defaultLocationId String?   @map("default_location_id") @db.Uuid
+  displayName       String    @map("display_name")
+  /// Email de contacto/invitación. Campo agregado en Etapa 1 (no estaba en el
+  /// sketch de Etapa 0): es una necesidad técnica del flujo de alta de usuarios
+  /// vía Supabase Auth (invitación por email), no un requisito de negocio nuevo.
+  /// Ver docs/ETAPA-1-BASE-CORE.md, sección "Desviaciones respecto de Etapa 0".
+  email             String    @unique
+  /// id del usuario en Supabase Auth (auth.users.id). Es lo que llega en el JWT
+  /// verificado por el backend en cada request.
+  authSubject       String    @unique @map("auth_subject")
+  active            Boolean   @default(true)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  role           Role         @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  defaultLocation Location?   @relation(fields: [defaultLocationId], references: [id], onDelete: SetNull)
+  auditLogs      AuditLog[]
+
+  @@index([organizationId])
+  @@index([roleId])
+  @@map("app_user")
+}
+
+/// Infraestructura de auditoría base (Etapa 1). `action`, `module`, `entityType` son
+/// texto libre a propósito: los módulos funcionales futuros (stock, ventas, mermas,
+/// caja, cierres) agregarán sus propias acciones sin requerir una migración de esquema
+/// ni tocar esta tabla — ver docs/ETAPA-0-ANALISIS-ARQUITECTURA.md, sección 10.9 y 15.
+/// Append-only: nunca se actualiza ni se borra un registro ya escrito (RN-009/RN-061).
+model AuditLog {
+  id             String      @id @default(uuid()) @db.Uuid
+  organizationId String      @map("organization_id") @db.Uuid
+  correlationId  String?     @map("correlation_id") @db.Uuid
+  userId         String?     @map("user_id") @db.Uuid
+  roleCode       RoleCode?   @map("role_code")
+  locationId     String?     @map("location_id") @db.Uuid
+  action         String
+  module         String
+  entityType     String?     @map("entity_type")
+  entityId       String?     @map("entity_id") @db.Uuid
+  beforeValue    Json?       @map("before_value")
+  afterValue     Json?       @map("after_value")
+  reason         String?
+  result         AuditResult @default(OK)
+  errorDetail    String?     @map("error_detail")
+  ipAddress      String?     @map("ip_address")
+  occurredAt     DateTime    @default(now()) @map("occurred_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  user         AppUser?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  location     Location?    @relation(fields: [locationId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, entityType, entityId])
+  @@index([organizationId, occurredAt])
+  @@map("audit_log")
+}
