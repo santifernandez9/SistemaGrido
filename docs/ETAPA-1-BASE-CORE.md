@@ -1,6 +1,6 @@
 # ETAPA 1 — Base / Core del Sistema
 
-Versión: 1.0 · Fecha: 2026-09-03 · Autor: Claude (a pedido del socio programador)
+Versión: 1.1 · Fecha: 2026-09-03 · Autor: Claude (a pedido del socio programador)
 Rama: `claude/etapa-1-base-core` (derivada de la rama aprobada de Etapa 0.1)
 
 > Este documento describe lo que efectivamente se construyó en Etapa 1: la base
@@ -12,6 +12,12 @@ Rama: `claude/etapa-1-base-core` (derivada de la rama aprobada de Etapa 0.1)
 > y `docs/ETAPA-0.1-CORRECCIONES.md`. Ninguna decisión aprobada en esos documentos
 > fue cambiada en silencio; los ajustes puramente técnicos que sí se tomaron están
 > documentados en la sección "Decisiones técnicas autónomas" más abajo.
+>
+> **Actualización v1.1 (Etapa 1.1)**: incorpora las correcciones de la auditoría
+> externa de Etapa 1 — validación organización/ubicación en `updateUser()` (§8.1),
+> compensación Auth↔`app_user` en `inviteUser()` (§8.1) y la decisión de auditoría
+> transaccional para operaciones críticas futuras (§7.1). Detalle completo en
+> `docs/ETAPA-1.1-CORRECCIONES.md`.
 
 ---
 
@@ -189,6 +195,38 @@ Usado hoy en: `LOGIN`, `LOGOUT` (módulo `AUTH`), `USER_INVITED`, `USER_UPDATED`
 `USER_DEACTIVATED`, `USER_REACTIVATED` (módulo `USERS`). Constantes centralizadas
 en `@sistema-grido/shared-types` (`CORE_AUDIT_MODULES`, `CORE_AUDIT_ACTIONS`).
 
+### 7.1. Decisión arquitectónica: auditoría transaccional para operaciones críticas futuras
+
+**Agregado en Etapa 1.1**, a partir de la auditoría externa de Etapa 1. `fastify.audit.log()`
+es, a propósito, **best-effort**: nunca lanza, y un fallo al escribir el registro de
+auditoría no revierte ni bloquea la operación de negocio que se estaba auditando (ver
+§7 arriba). Eso es correcto y suficiente para los usos actuales de esta etapa (`LOGIN`,
+`LOGOUT`, alta/edición/activación de usuarios) — son eventos donde perder una fila de
+auditoría en el caso extremo de un fallo de escritura no compromete ninguna garantía
+funcional del sistema.
+
+**Esto deja de ser suficiente para operaciones funcionales futuras donde el registro de
+auditoría es parte de la garantía de trazabilidad del propio dominio** — por ejemplo (a
+título ilustrativo, ninguna de estas se implementa en esta etapa):
+
+- ajustes de inventario;
+- cierre semanal;
+- anulaciones;
+- reversión de movimientos;
+- correcciones críticas sobre stock, caja o costos.
+
+Para ese tipo de operación, la modificación de dominio y su registro de auditoría
+**deberán ejecutarse dentro de la misma transacción de PostgreSQL** cuando técnicamente
+corresponda (es decir: si la escritura de auditoría falla, la transacción completa hace
+rollback — la operación de negocio nunca queda aplicada sin su rastro de auditoría). El
+mecanismo actual, `fastify.audit.log()` best-effort tal como está hoy, **no debe
+reutilizarse tal cual como única garantía de auditoría** para esas operaciones futuras.
+
+Esta etapa no implementa ningún mecanismo de auditoría transaccional nuevo, ni ninguno
+de los módulos funcionales listados arriba — sólo deja esta decisión documentada para
+que las etapas que sí los implementen no reintroduzcan por descuido el mismo patrón
+best-effort donde no corresponde.
+
 ---
 
 ## 8. Backend (`apps/api`)
@@ -201,16 +239,37 @@ escucharla en un puerto (la usan tanto `src/index.ts` como los tests, vía
 
 **Endpoints implementados:**
 
-| Método | Ruta                | Auth    | Rol               | Descripción                                                     |
-| ------ | ------------------- | ------- | ----------------- | --------------------------------------------------------------- |
-| GET    | `/health`           | Pública | —                 | Healthcheck: confirma proceso vivo + conexión a DB (`SELECT 1`) |
-| POST   | `/api/auth/session` | Sí      | Cualquiera activo | Acuse de sesión iniciada, registra auditoría `LOGIN`            |
-| POST   | `/api/auth/logout`  | Sí      | Cualquiera activo | Acuse de cierre de sesión, registra auditoría `LOGOUT`          |
-| GET    | `/api/me`           | Sí      | Cualquiera activo | Perfil del usuario autenticado (sin efecto de auditoría)        |
-| GET    | `/api/users`        | Sí      | ADMIN             | Lista de usuarios de la organización                            |
-| POST   | `/api/users`        | Sí      | ADMIN             | Invitar usuario (Supabase Auth Admin API + fila `app_user`)     |
-| PATCH  | `/api/users/:id`    | Sí      | ADMIN             | Editar rol/ubicación/nombre/estado activo de un usuario         |
-| GET    | `/api/locations`    | Sí      | ADMIN             | Lista de ubicaciones activas de la organización                 |
+| Método | Ruta                | Auth    | Rol               | Descripción                                                                                                    |
+| ------ | ------------------- | ------- | ----------------- | -------------------------------------------------------------------------------------------------------------- |
+| GET    | `/health`           | Pública | —                 | Healthcheck: confirma proceso vivo + conexión a DB (`SELECT 1`)                                                |
+| POST   | `/api/auth/session` | Sí      | Cualquiera activo | Acuse de sesión iniciada, registra auditoría `LOGIN`                                                           |
+| POST   | `/api/auth/logout`  | Sí      | Cualquiera activo | Acuse de cierre de sesión, registra auditoría `LOGOUT`                                                         |
+| GET    | `/api/me`           | Sí      | Cualquiera activo | Perfil del usuario autenticado (sin efecto de auditoría)                                                       |
+| GET    | `/api/users`        | Sí      | ADMIN             | Lista de usuarios de la organización                                                                           |
+| POST   | `/api/users`        | Sí      | ADMIN             | Invitar usuario (Supabase Auth Admin API + fila `app_user`, con compensación ante fallo — ver §8.1)            |
+| PATCH  | `/api/users/:id`    | Sí      | ADMIN             | Editar rol/ubicación/nombre/estado activo de un usuario (ubicación validada contra la organización — ver §8.1) |
+| GET    | `/api/locations`    | Sí      | ADMIN             | Lista de ubicaciones activas de la organización                                                                |
+
+### 8.1. Correcciones de consistencia aplicadas en Etapa 1.1
+
+A partir de la auditoría externa de Etapa 1, `apps/api/src/services/users.ts` recibió
+dos correcciones (detalle completo, motivación y tests en
+`docs/ETAPA-1.1-CORRECCIONES.md`):
+
+- **`updateUser()` valida `defaultLocationId` contra la organización del usuario**, con
+  la misma regla que ya aplicaba `inviteUser()` (helper compartido
+  `assertLocationBelongsToOrganization`): una ubicación sólo puede asignarse si
+  `location.organization_id = user.organization_id`. Nunca se confía en el UUID
+  recibido, en el rol del usuario ni en datos previos — se revalida en cada request.
+  `defaultLocationId: null` (quitar la ubicación) sigue permitido sin cambios.
+- **`inviteUser()` compensa una cuenta de Supabase Auth huérfana** cuando la creación
+  del usuario en Auth tiene éxito pero la persistencia de `app_user` en PostgreSQL falla
+  después (no hay transacción distribuida entre ambos sistemas). La compensación
+  elimina **únicamente** el usuario de Auth creado por esa llamada puntual (se conserva
+  su id explícitamente, nunca se busca/elimina por email); si la propia compensación
+  también falla, se loguea con contexto completo (organización, email, id de Auth,
+  error de persistencia y error de compensación) para intervención manual, y la
+  operación **nunca devuelve éxito** en ningún escenario de fallo.
 
 `GET /api/locations` **no estaba enumerado explícitamente** en la lista de
 endpoints del prompt de Etapa 1 — ver sección "Desviaciones respecto de Etapa 0".
@@ -323,18 +382,20 @@ locales").
 
 Vitest en todos los paquetes/apps que tienen lógica propia.
 
-| Paquete/app             | Archivos de test | Tests | Qué cubre                                                                                                                                                                                                                                                                           |
-| ----------------------- | ---------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/db`           | 1                | 1     | Roles confirmados (`ROLE_CODES`)                                                                                                                                                                                                                                                    |
-| `apps/api`              | 6                | 35    | Config (variables inválidas/faltantes), errores tipados, `/health`, flujo completo de auth (token inválido, usuario inexistente, usuario inactivo, sesión válida), flujo completo de usuarios (listar, invitar, editar, activar/desactivar, autorización por rol), `/api/locations` |
-| `apps/admin-web`        | 3                | 7     | `ErrorBoundary`, `App` (ruteo protegido por rol), `LoginPage`                                                                                                                                                                                                                       |
-| `apps/shop-pwa`         | 3                | 4     | `ErrorBoundary`, `App`, `LoginPage`                                                                                                                                                                                                                                                 |
-| `packages/shared-types` | —                | —     | Sin tests propios (sólo tipos; se ejercitan indirectamente vía los consumidores)                                                                                                                                                                                                    |
-| `packages/auth-client`  | —                | —     | Sin tests propios en esta etapa (se ejercita indirectamente vía `admin-web`/`shop-pwa`, que mockean el paquete completo)                                                                                                                                                            |
+| Paquete/app             | Archivos de test | Tests | Qué cubre                                                                                                                                                                                                                                                                                                                                                                                        |
+| ----------------------- | ---------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `packages/db`           | 1                | 1     | Roles confirmados (`ROLE_CODES`)                                                                                                                                                                                                                                                                                                                                                                 |
+| `apps/api`              | 6                | 44    | Config (variables inválidas/faltantes), errores tipados, `/health`, flujo completo de auth (token inválido, usuario inexistente, usuario inactivo, sesión válida), flujo completo de usuarios (listar, invitar, editar, activar/desactivar, autorización por rol, validación organización/ubicación en `updateUser`, compensación Auth↔`app_user` en `inviteUser` — Etapa 1.1), `/api/locations` |
+| `apps/admin-web`        | 3                | 7     | `ErrorBoundary`, `App` (ruteo protegido por rol), `LoginPage`                                                                                                                                                                                                                                                                                                                                    |
+| `apps/shop-pwa`         | 3                | 4     | `ErrorBoundary`, `App`, `LoginPage`                                                                                                                                                                                                                                                                                                                                                              |
+| `packages/shared-types` | —                | —     | Sin tests propios (sólo tipos; se ejercitan indirectamente vía los consumidores)                                                                                                                                                                                                                                                                                                                 |
+| `packages/auth-client`  | —                | —     | Sin tests propios en esta etapa (se ejercita indirectamente vía `admin-web`/`shop-pwa`, que mockean el paquete completo)                                                                                                                                                                                                                                                                         |
 
-**Total: 47 tests, 13 archivos de test, 100% en verde** (última corrida completa,
-confirmada en esta etapa con una base de datos Postgres real recién creada y
-migrada desde cero — no una base reusada de corridas anteriores).
+**Total: 56 tests, 13 archivos de test, 100% en verde** (última corrida completa,
+confirmada en Etapa 1.1 con una base de datos Postgres real recién creada y
+migrada desde cero — no una base reusada de corridas anteriores). 9 tests nuevos
+respecto de Etapa 1 (4 de Corrección 1, 5 de Corrección 2 — detalle en
+`docs/ETAPA-1.1-CORRECCIONES.md`).
 
 Los tests de `apps/api` corren contra una base Postgres **real**
 (`sistemagrido_test`), no mockeada — se consideró más representativo para

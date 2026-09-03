@@ -1,8 +1,10 @@
 /**
  * Doble de prueba de @supabase/supabase-js. No hay proyecto Supabase real disponible
  * en este entorno de desarrollo/CI, así que los tests reemplazan `createClient` por
- * este mock y controlan qué devuelve `auth.getUser` (verificación de token) y
- * `auth.admin.inviteUserByEmail` (alta de usuario) en cada caso con mockGetUser/mockInviteUser.
+ * este mock y controlan qué devuelve `auth.getUser` (verificación de token),
+ * `auth.admin.inviteUserByEmail` (alta de usuario) y `auth.admin.deleteUser`
+ * (compensación, Corrección 2 de Etapa 1.1) en cada caso con
+ * mockGetUser/mockInviteUser/mockDeleteUser.
  *
  * Uso en un archivo de test (vi.mock debe llamarse en el propio archivo, no
  * indirectamente, por cómo Vitest hoistea los mocks):
@@ -21,6 +23,11 @@ interface InviteResult {
   error: { message: string } | null;
 }
 
+interface DeleteUserResult {
+  data: unknown;
+  error: { message: string } | null;
+}
+
 let getUserResult: GetUserResult = {
   data: { user: null },
   error: { message: 'no configurado en el test' },
@@ -29,6 +36,9 @@ let inviteResult: InviteResult = {
   data: { user: null },
   error: { message: 'no configurado en el test' },
 };
+let deleteUserResult: DeleteUserResult = { data: {}, error: null };
+let deleteUserThrows: unknown = null;
+let deleteUserCalls: string[] = [];
 
 export function mockGetUser(result: GetUserResult): void {
   getUserResult = result;
@@ -38,6 +48,31 @@ export function mockInviteUser(result: InviteResult): void {
   inviteResult = result;
 }
 
+/** Controla qué devuelve auth.admin.deleteUser(id). Por defecto, éxito. */
+export function mockDeleteUser(result: DeleteUserResult): void {
+  deleteUserResult = result;
+  deleteUserThrows = null;
+}
+
+/** Simula que la propia llamada a deleteUser lanza (p. ej. error de red), no que devuelve `error`. */
+export function mockDeleteUserThrows(thrown: unknown): void {
+  deleteUserThrows = thrown;
+}
+
+/** Ids que recibió auth.admin.deleteUser durante el test -- para confirmar qué se compensó (y qué no). */
+export function getDeleteUserCalls(): string[] {
+  return deleteUserCalls;
+}
+
+/** Reinicia todo el estado del mock (llamar en beforeEach). */
+export function resetSupabaseMock(): void {
+  getUserResult = { data: { user: null }, error: { message: 'no configurado en el test' } };
+  inviteResult = { data: { user: null }, error: { message: 'no configurado en el test' } };
+  deleteUserResult = { data: {}, error: null };
+  deleteUserThrows = null;
+  deleteUserCalls = [];
+}
+
 export function createSupabaseMockModule() {
   return {
     createClient: () => ({
@@ -45,6 +80,13 @@ export function createSupabaseMockModule() {
         getUser: (_token: string) => Promise.resolve(getUserResult),
         admin: {
           inviteUserByEmail: (_email: string) => Promise.resolve(inviteResult),
+          deleteUser: (id: string) => {
+            deleteUserCalls.push(id);
+            if (deleteUserThrows) {
+              return Promise.reject(deleteUserThrows);
+            }
+            return Promise.resolve(deleteUserResult);
+          },
         },
       },
     }),
