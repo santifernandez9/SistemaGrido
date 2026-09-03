@@ -3,12 +3,16 @@ import { RequireAuth } from '@sistema-grido/auth-client';
 import { LoginPage } from './pages/LoginPage.js';
 import { DashboardPage } from './pages/DashboardPage.js';
 import { UsersPage } from './pages/UsersPage.js';
+import { CategoriesPage } from './pages/CategoriesPage.js';
+import { FlavorsPage } from './pages/FlavorsPage.js';
+import { ProductsPage } from './pages/ProductsPage.js';
 import { Layout } from './components/Layout.js';
 
 /**
- * Routing base de Etapa 1 (sección 12 del prompt): login, layout, rutas protegidas
- * y una pantalla inicial neutra. Ninguna pantalla operativa final (conteo, stock,
- * ventas, caja, cierres) se implementa acá -- eso es de etapas futuras.
+ * Routing (Etapa 1 + Etapa 2, sección 15 del prompt de Etapa 2): login, layout,
+ * rutas protegidas y las pantallas de catálogo/maestros. Ninguna pantalla operativa
+ * de inventario (conteo, stock, ventas, caja, cierres) se implementa acá -- eso es
+ * de etapas futuras.
  */
 export function App() {
   return (
@@ -28,6 +32,30 @@ export function App() {
           element={
             <RequireAuth roles={['ADMIN']}>
               <UsersPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="categorias"
+          element={
+            <RequireAuth roles={['ADMIN']}>
+              <CategoriesPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="sabores"
+          element={
+            <RequireAuth roles={['ADMIN']}>
+              <FlavorsPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="productos"
+          element={
+            <RequireAuth roles={['ADMIN']}>
+              <ProductsPage />
             </RequireAuth>
           }
         />

@@ -28,7 +28,7 @@ export async function toUserProfile(
 ): Promise<UserProfile> {
   const user = await fastify.db.appUser.findUniqueOrThrow({
     where: { id: userId },
-    include: { role: true },
+    include: { role: true, defaultLocation: true },
   });
   return mapToProfile(user);
 }
@@ -38,6 +38,7 @@ function mapToProfile(user: {
   organizationId: string;
   role: { code: UserProfile['roleCode'] };
   defaultLocationId: string | null;
+  defaultLocation: { name: string } | null;
   displayName: string;
   email: string;
   active: boolean;
@@ -48,6 +49,7 @@ function mapToProfile(user: {
     organizationId: user.organizationId,
     roleCode: user.role.code,
     defaultLocationId: user.defaultLocationId,
+    defaultLocationName: user.defaultLocation?.name ?? null,
     displayName: user.displayName,
     email: user.email,
     active: user.active,
@@ -61,7 +63,7 @@ export async function listUsers(
 ): Promise<UserProfile[]> {
   const users = await fastify.db.appUser.findMany({
     where: { organizationId },
-    include: { role: true },
+    include: { role: true, defaultLocation: true },
     orderBy: { createdAt: 'asc' },
   });
   return users.map(mapToProfile);
@@ -116,7 +118,7 @@ export async function inviteUser(
         email: input.email,
         authSubject: createdAuthUserId,
       },
-      include: { role: true },
+      include: { role: true, defaultLocation: true },
     });
 
     return mapToProfile(created);
@@ -187,7 +189,7 @@ export async function updateUser(
 ): Promise<{ before: UserProfile; after: UserProfile }> {
   const existing = await fastify.db.appUser.findFirst({
     where: { id: userId, organizationId },
-    include: { role: true },
+    include: { role: true, defaultLocation: true },
   });
   if (!existing) {
     throw new NotFoundError('Usuario no encontrado en esta organización');
@@ -219,7 +221,7 @@ export async function updateUser(
         : {}),
       ...(input.active !== undefined ? { active: input.active } : {}),
     },
-    include: { role: true },
+    include: { role: true, defaultLocation: true },
   });
 
   return { before, after: mapToProfile(updated) };

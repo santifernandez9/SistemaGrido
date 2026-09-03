@@ -62,9 +62,14 @@ model Organization {
   timezone  String   @default("America/Argentina/Cordoba")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  locations  Location[]
-  users      AppUser[]
-  auditLogs  AuditLog[]
+  locations      Location[]
+  users          AppUser[]
+  auditLogs      AuditLog[]
+  categories     Category[]
+  productTypes   ProductType[]
+  unitsOfMeasure UnitOfMeasure[]
+  flavors        Flavor[]
+  products       Product[]
 
   @@map("organization")
 }
@@ -160,4 +165,161 @@ model AuditLog {
   @@index([organizationId, entityType, entityId])
   @@index([organizationId, occurredAt])
   @@map("audit_log")
+}
+
+// ---------------------------------------------------------------------------
+// Catálogo y maestros (Etapa 2) — ver docs/ETAPA-2-CATALOGO-MAESTROS.md.
+//
+// Sólo estructura de datos maestros (RF-001 a RF-007 de Etapa 0, CONFIRMADOS).
+// Ninguna tabla de esta sección es un movimiento ni afecta stock: eso es el
+// motor de inventario de una etapa posterior (ledger, conteos, BOM funcional,
+// mermas, etc. — explícitamente fuera de Etapa 2).
+//
+// Baja lógica en las 5 entidades (nunca DELETE físico vía API): un maestro
+// puede estar referenciado por historial futuro (productos, movimientos), así
+// que todas usan `active`, igual que Location/AppUser en Etapa 1.
+
+/// Categoría/grupo de producto (RF-002/RN-002, CONFIRMADO). Auto-referencial
+/// para representar el "grupo" (parentCategoryId = null) y el "subgrupo"
+/// opcional (RN-002: "un producto pertenece a un grupo y opcionalmente a un
+/// subgrupo") con una única tabla, en vez de dos tablas separadas: ambos
+/// niveles comparten exactamente los mismos atributos (nombre, organización,
+/// estado), y el material real (hoja PRODUCTOS de Habash) sólo usa un nivel
+/// plano de 35 categorías variables — no hay evidencia de una tabla de
+/// subgrupos distinta, así que se prepara el nivel opcional sin inventar una
+/// segunda entidad. Datos persistidos, nunca hardcodeados en frontend (Etapa 2 §5).
+model Category {
+  id               String   @id @default(uuid()) @db.Uuid
+  organizationId   String   @map("organization_id") @db.Uuid
+  parentCategoryId String?  @map("parent_category_id") @db.Uuid
+  name             String
+  active           Boolean  @default(true)
+  createdAt        DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt        DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  parentCategory Category?    @relation("CategoryToSubcategory", fields: [parentCategoryId], references: [id], onDelete: Restrict)
+  subcategories  Category[]   @relation("CategoryToSubcategory")
+  products       Product[]
+
+  @@unique([organizationId, parentCategoryId, name])
+  @@index([organizationId])
+  @@index([parentCategoryId])
+  @@map("category")
+}
+
+/// Tipo/línea de producto (RF-002, CONFIRMADO como campo; valores RESPALDADOS
+/// por evidencia real: columna "PALLET" de la hoja PRODUCTOS de Habash sólo
+/// contiene HELADO/INSUMO en las 214 filas reales -- ver
+/// docs/ETAPA-2-CATALOGO-MAESTROS.md, matriz de decisiones). Tabla persistida
+/// en vez de enum Prisma, igual criterio que Category (Etapa 2 §5: evitar
+/// rigidez si no hay confirmación textual del cliente de que sea una lista
+/// cerrada para siempre). Sin API de alta en esta etapa -- ver sección
+/// "Permisos" del documento de Etapa 2: catálogo técnico sembrado, sólo lectura.
+model ProductType {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  code           String
+  name           String
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  products     Product[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+  @@map("product_type")
+}
+
+/// Unidad de manejo (Etapa 2 §7: "unidad; lata; caja"). Tabla persistida, no
+/// hardcodeada en frontend. Igual que ProductType: catálogo técnico sembrado
+/// (evidencia real: columna UNIDAD de la hoja PRODUCTOS sólo usa
+/// CAJA/LATA/UNIDAD), sin API de alta en esta etapa.
+model UnitOfMeasure {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  code           String
+  name           String
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  products     Product[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+  @@map("unit_of_measure")
+}
+
+/// Sabor de helado (RF-003/RN-003, CONFIRMADO: "los sabores de helado a granel
+/// siempre se registran, cuentan y analizan individualmente"). Entidad propia,
+/// separada de Product, para que el análisis/consumo futuro por sabor no
+/// dependa de una presentación/envase puntual -- aunque hoy, en el material
+/// real, cada sabor corresponde 1:1 a un producto (lata), la relación
+/// Product.flavorId permite que eso deje de ser así sin migrar el esquema.
+model Flavor {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  name           String
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  products     Product[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+  @@map("flavor")
+}
+
+/// Catálogo único de productos (RF-001, CONFIRMADO: "UUID propio, nunca el
+/// nombre como clave"). Entidad central de Etapa 2 -- ver
+/// docs/ETAPA-2-CATALOGO-MAESTROS.md, sección "Modelo implementado", para la
+/// justificación completa de cada campo contra el material real y contra
+/// RF-001..RF-007 de Etapa 0.
+///
+/// NO incluye: costo (RN-002/RN-003 lo ubican a nivel de Category, pero su
+/// implementación real -- costo vigente, historial -- es RF-039, P3, fuera del
+/// Hito 1; no se adelanta), código externo/SAP ni alias (RF-004 es CONFIRMADO
+/// pero su único consumo es matching de importación de ventas/facturas,
+/// explícitamente fuera de Etapa 2), BOM (RF-007, fuera de Etapa 2), stock
+/// mínimo/ideal (pertenece al motor de inventario, fuera de Etapa 2).
+model Product {
+  id              String   @id @default(uuid()) @db.Uuid
+  organizationId  String   @map("organization_id") @db.Uuid
+  /// Código de negocio legible, opcional (RF-001: la clave real es el `id`
+  /// UUID; este campo es sólo una referencia humana, como la que ya usa el
+  /// sistema actual -- p. ej. "P001"). Único por organización cuando se define;
+  /// Postgres permite múltiples NULL en una constraint UNIQUE, así que un
+  /// producto sin código no colisiona con otro.
+  code            String?
+  name            String
+  categoryId      String   @map("category_id") @db.Uuid
+  productTypeId   String   @map("product_type_id") @db.Uuid
+  unitOfMeasureId String   @map("unit_of_measure_id") @db.Uuid
+  /// Equivalencia/factor de conversión del producto (RF-002 "unidades por
+  /// presentación"; RN-006 "factor de conversión del producto", singular):
+  /// cuántas unidades sueltas contiene la unidad de manejo de este producto.
+  /// 1 cuando la unidad de manejo ya es la unidad mínima (ej. LATA, UNIDAD).
+  unitsPerHandlingUnit Int  @default(1) @map("units_per_handling_unit")
+  /// Sabor asociado, sólo para productos que lo tienen (RF-003). NULL para
+  /// insumos, packaging, etc.
+  flavorId        String?  @map("flavor_id") @db.Uuid
+  active          Boolean  @default(true)
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  category      Category      @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  productType   ProductType   @relation(fields: [productTypeId], references: [id], onDelete: Restrict)
+  unitOfMeasure UnitOfMeasure @relation(fields: [unitOfMeasureId], references: [id], onDelete: Restrict)
+  flavor        Flavor?       @relation(fields: [flavorId], references: [id], onDelete: Restrict)
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+  @@index([categoryId])
+  @@index([flavorId])
+  @@map("product")
 }

@@ -12,7 +12,8 @@
     "apps/*"
   ],
   "overrides": {
-    "deepmerge-ts": "^8.0.2"
+    "deepmerge-ts": "^8.0.2",
+    "uuid": "^11.1.1"
   },
   "scripts": {
     "build": "npm run build --workspaces --if-present",
@@ -27,7 +28,8 @@
     "db:generate": "npm run generate --workspace packages/db",
     "db:migrate:dev": "npm run migrate:dev --workspace packages/db",
     "db:migrate:deploy": "npm run migrate:deploy --workspace packages/db",
-    "db:seed": "npm run seed --workspace packages/db"
+    "db:seed": "npm run seed --workspace packages/db",
+    "db:import-catalog": "npm run import:catalog --workspace packages/db --"
   },
   "devDependencies": {
     "@eslint/js": "^9.17.0",

@@ -1363,6 +1363,13 @@ flowchart LR
 
 _(Extracto representativo — la trazabilidad completa RF↔RN↔Entidad↔Módulo↔Etapa↔Prueba se sostiene 1 a 1 en las tablas de las secciones 4, 5, 10 y 23; esta tabla resume el recorrido completo para los bloques funcionales principales.)_
 
+> **Actualización (Etapa 2)**: la fila "RF-001..007 (Catálogo)" de abajo describe el
+> plan original. Lo que efectivamente se implementó (y lo que quedó explícitamente
+> fuera, como `product_alias` y `bom`/`bom_line`, ambos ligados a importación de
+> ventas/BOM funcional) está documentado con el detalle real, campo por campo, en
+> `docs/ETAPA-2-CATALOGO-MAESTROS.md`, sección "Trazabilidad". Esta tabla histórica
+> no se reescribe.
+
 | Requisito                                                                                         | Regla(s)                         | Entidad(es)                                                    | Módulo                                                       | Etapa (backend/schema → completo)          | Tipo de prueba                                                                |
 | ------------------------------------------------------------------------------------------------- | -------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------ | ----------------------------------------------------------------------------- |
 | RF-001..007 (Catálogo)                                                                            | RN-001..006, RN-020..024         | `product`, `product_group`, `product_alias`, `bom`, `bom_line` | Catálogo                                                     | Etapa 2 (única — no requiere PWA)          | Unitaria (conversión de unidades, matching de alias)                          |

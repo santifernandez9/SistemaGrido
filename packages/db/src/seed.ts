@@ -57,9 +57,42 @@ async function main() {
     console.log(`  location OK: ${loc.name} (${loc.type})`);
   }
 
+  // Catálogos técnicos de Etapa 2 (docs/ETAPA-2-CATALOGO-MAESTROS.md): valores
+  // evidenciados por el material real del cliente (hoja PRODUCTOS de Habash), no
+  // datos de negocio del cliente en sí -- por eso van en el seed técnico, igual que
+  // los roles, y no en el importador de catálogo.
+  const productTypes: Array<{ code: string; name: string }> = [
+    { code: 'HELADO', name: 'Helado' },
+    { code: 'INSUMO', name: 'Insumo' },
+  ];
+  for (const pt of productTypes) {
+    await prisma.productType.upsert({
+      where: { organizationId_code: { organizationId: organization.id, code: pt.code } },
+      update: {},
+      create: { organizationId: organization.id, code: pt.code, name: pt.name },
+    });
+    console.log(`  product type OK: ${pt.code}`);
+  }
+
+  const unitsOfMeasure: Array<{ code: string; name: string }> = [
+    { code: 'UNIDAD', name: 'Unidad' },
+    { code: 'LATA', name: 'Lata' },
+    { code: 'CAJA', name: 'Caja' },
+  ];
+  for (const uom of unitsOfMeasure) {
+    await prisma.unitOfMeasure.upsert({
+      where: { organizationId_code: { organizationId: organization.id, code: uom.code } },
+      update: {},
+      create: { organizationId: organization.id, code: uom.code, name: uom.name },
+    });
+    console.log(`  unit of measure OK: ${uom.code}`);
+  }
+
   console.log(
     '\nSeed completo. No se creó ningún app_user: para tener el primer ADMIN, invitalo desde ' +
-      'la API una vez que exista una cuenta de Supabase Auth (ver docs/ETAPA-1-BASE-CORE.md).',
+      'la API una vez que exista una cuenta de Supabase Auth (ver docs/ETAPA-1-BASE-CORE.md).\n' +
+      'Tampoco se cargó catálogo de productos real: ver packages/db/src/import-catalog.ts y ' +
+      'docs/ETAPA-2-CATALOGO-MAESTROS.md, sección "Importación inicial".',
   );
 }
 

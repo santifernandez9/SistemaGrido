@@ -51,6 +51,7 @@ describe('App (shop-pwa) — routing base', () => {
       organizationId: 'org1',
       roleCode: 'SHOP_EMPLOYEE',
       defaultLocationId: 'loc1',
+      defaultLocationName: 'Heladería Demo 1',
       displayName: 'Flavia',
       email: 'flavia@test.com',
       active: true,
@@ -62,6 +63,12 @@ describe('App (shop-pwa) — routing base', () => {
       </MemoryRouter>,
     );
     expect(screen.getAllByText(/Flavia/).length).toBeGreaterThan(0);
-    expect(screen.getByText('Empleada de heladería')).toBeInTheDocument();
+    // Ajustado en Etapa 2 (sección 18: el shell debe mostrar también la sucursal):
+    // el rol y la sucursal ahora comparten el mismo <span> ("Empleada de heladería ·
+    // Heladería Demo 1"), así que ya no hay un nodo con el texto exacto de sólo el
+    // rol -- se verifica por substring en vez de por igualdad exacta.
+    expect(screen.getByText(/Empleada de heladería/)).toBeInTheDocument();
+    // Aparece dos veces: en el header (Layout) y en el badge de sucursal (HomePage).
+    expect(screen.getAllByText(/Heladería Demo 1/).length).toBeGreaterThan(0);
   });
 });

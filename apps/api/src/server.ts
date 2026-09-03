@@ -14,6 +14,11 @@ import authRoutes from './routes/auth.js';
 import meRoutes from './routes/me.js';
 import usersRoutes from './routes/users.js';
 import locationsRoutes from './routes/locations.js';
+import categoriesRoutes from './routes/categories.js';
+import flavorsRoutes from './routes/flavors.js';
+import productTypesRoutes from './routes/product-types.js';
+import unitsOfMeasureRoutes from './routes/units-of-measure.js';
+import productsRoutes from './routes/products.js';
 
 /**
  * Arma la app de Fastify sin escucharla en un puerto -- así `src/index.ts` la usa
@@ -38,6 +43,13 @@ export async function buildServer(overrides?: Partial<AppConfig>): Promise<Fasti
 
   await app.register(cors, {
     origin: config.corsOrigins,
+    // El default de @fastify/cors es sólo 'GET,HEAD,POST' -- sin esto, cualquier
+    // PATCH real desde un navegador (activar/desactivar, editar) queda bloqueado
+    // en el preflight con un error de CORS que `app.inject()` nunca reproduce (los
+    // tests no pasan por un preflight OPTIONS real). Encontrado al probar la Etapa 2
+    // en un navegador real -- ver docs/ETAPA-2-CATALOGO-MAESTROS.md, sección
+    // "Seguridad"/"CORS".
+    methods: ['GET', 'POST', 'PATCH'],
     credentials: true,
   });
 
@@ -52,6 +64,11 @@ export async function buildServer(overrides?: Partial<AppConfig>): Promise<Fasti
   await app.register(meRoutes);
   await app.register(usersRoutes);
   await app.register(locationsRoutes);
+  await app.register(categoriesRoutes);
+  await app.register(flavorsRoutes);
+  await app.register(productTypesRoutes);
+  await app.register(unitsOfMeasureRoutes);
+  await app.register(productsRoutes);
 
   return app;
 }

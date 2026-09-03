@@ -10,6 +10,12 @@ export interface UserProfile {
   roleCode: RoleCode;
   /** Ubicación asignada. null para ADMIN (acceso a toda la organización). */
   defaultLocationId: string | null;
+  /**
+   * Nombre de esa ubicación, o null si no tiene. Agregado en Etapa 2 (sección 18:
+   * la Shop PWA necesita mostrar la sucursal de la persona logueada) -- no es un
+   * campo nuevo en base de datos, sólo se agrega al DTO de lectura.
+   */
+  defaultLocationName: string | null;
   displayName: string;
   email: string;
   active: boolean;

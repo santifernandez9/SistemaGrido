@@ -7,6 +7,11 @@ import { prisma } from '@sistema-grido/db';
  * base de datos de test (ver docs/ETAPA-1-BASE-CORE.md, sección "Tests").
  */
 export async function resetCoreTables(): Promise<void> {
+  await prisma.product.deleteMany();
+  await prisma.category.deleteMany();
+  await prisma.productType.deleteMany();
+  await prisma.unitOfMeasure.deleteMany();
+  await prisma.flavor.deleteMany();
   await prisma.auditLog.deleteMany();
   await prisma.appUser.deleteMany();
   await prisma.location.deleteMany();
@@ -30,4 +35,32 @@ export async function seedRoles(): Promise<
 export async function seedOrganization(): Promise<string> {
   const org = await prisma.organization.create({ data: { name: 'Organización de test' } });
   return org.id;
+}
+
+/** Catálogos técnicos de Etapa 2 (ver packages/db/src/seed.ts) para un test dado. */
+export async function seedProductTypes(
+  organizationId: string,
+): Promise<Record<'HELADO' | 'INSUMO', string>> {
+  const helado = await prisma.productType.create({
+    data: { organizationId, code: 'HELADO', name: 'Helado' },
+  });
+  const insumo = await prisma.productType.create({
+    data: { organizationId, code: 'INSUMO', name: 'Insumo' },
+  });
+  return { HELADO: helado.id, INSUMO: insumo.id };
+}
+
+export async function seedUnitsOfMeasure(
+  organizationId: string,
+): Promise<Record<'UNIDAD' | 'LATA' | 'CAJA', string>> {
+  const unidad = await prisma.unitOfMeasure.create({
+    data: { organizationId, code: 'UNIDAD', name: 'Unidad' },
+  });
+  const lata = await prisma.unitOfMeasure.create({
+    data: { organizationId, code: 'LATA', name: 'Lata' },
+  });
+  const caja = await prisma.unitOfMeasure.create({
+    data: { organizationId, code: 'CAJA', name: 'Caja' },
+  });
+  return { UNIDAD: unidad.id, LATA: lata.id, CAJA: caja.id };
 }

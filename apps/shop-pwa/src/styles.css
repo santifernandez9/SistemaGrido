@@ -130,3 +130,14 @@ button:disabled {
   padding: 6px 12px;
   font-size: 13px;
 }
+
+.location-badge {
+  display: inline-block;
+  background: #e3f5e8;
+  color: #1a7a35;
+  font-weight: 600;
+  font-size: 13px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  margin: 4px 0 12px;
+}

@@ -11,6 +11,7 @@
     "migrate:deploy": "prisma migrate deploy",
     "migrate:reset": "prisma migrate reset --force",
     "seed": "tsx src/seed.ts",
+    "import:catalog": "tsx src/import-catalog.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run"
   },
@@ -21,6 +22,7 @@
     "@sistema-grido/shared-types": "*",
     "@types/node": "^22.10.10",
     "dotenv": "^16.4.7",
+    "exceljs": "4.4.0",
     "prisma": "6.19.3",
     "tsx": "^4.19.2",
     "typescript": "5.9.3",

@@ -8,7 +8,11 @@ const ROLE_LABELS: Record<string, string> = {
   SHOP_EMPLOYEE: 'Empleada de heladería',
 };
 
-/** Layout mobile-first: header compacto + contenido a pantalla completa. */
+/**
+ * Layout mobile-first: header compacto + contenido a pantalla completa. Muestra
+ * identidad, rol y sucursal (Etapa 2, sección 18: "identidad del usuario; sucursal;
+ * navegación/shell; estado de sesión") -- sin ninguna pantalla operativa todavía.
+ */
 export function Layout() {
   const { user, signOut } = useAuth();
 
@@ -17,7 +21,10 @@ export function Layout() {
       <header className="app-header">
         <div className="who">
           <strong>{user?.displayName}</strong>
-          <span className="muted">{user ? ROLE_LABELS[user.roleCode] : ''}</span>
+          <span className="muted">
+            {user ? ROLE_LABELS[user.roleCode] : ''}
+            {user?.defaultLocationName ? ` · ${user.defaultLocationName}` : ''}
+          </span>
         </div>
         <button type="button" className="link-button" onClick={() => void signOut()}>
           Salir

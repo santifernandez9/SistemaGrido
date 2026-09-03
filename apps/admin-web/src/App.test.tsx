@@ -49,6 +49,7 @@ describe('App — routing base', () => {
       organizationId: 'org1',
       roleCode: 'ADMIN',
       defaultLocationId: null,
+      defaultLocationName: null,
       displayName: 'Ana Admin',
       email: 'ana@test.com',
       active: true,
@@ -68,6 +69,7 @@ describe('App — routing base', () => {
       organizationId: 'org1',
       roleCode: 'SHOP_EMPLOYEE',
       defaultLocationId: 'loc1',
+      defaultLocationName: 'Heladería Demo 1',
       displayName: 'Empleada',
       email: 'empleada@test.com',
       active: true,
@@ -79,5 +81,46 @@ describe('App — routing base', () => {
       </MemoryRouter>,
     );
     expect(screen.queryByText('Usuarios')).not.toBeInTheDocument();
+  });
+
+  it('un ADMIN ve la navegación de catálogo (Productos/Categorías/Sabores); una empleada no', () => {
+    mockUser = {
+      id: 'u1',
+      organizationId: 'org1',
+      roleCode: 'ADMIN',
+      defaultLocationId: null,
+      defaultLocationName: null,
+      displayName: 'Ana Admin',
+      email: 'ana@test.com',
+      active: true,
+      createdAt: new Date().toISOString(),
+    };
+    const { unmount } = render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText('Productos')).toBeInTheDocument();
+    expect(screen.getByText('Categorías')).toBeInTheDocument();
+    expect(screen.getByText('Sabores')).toBeInTheDocument();
+    unmount();
+
+    mockUser = {
+      id: 'u2',
+      organizationId: 'org1',
+      roleCode: 'SHOP_EMPLOYEE',
+      defaultLocationId: 'loc1',
+      defaultLocationName: 'Heladería Demo 1',
+      displayName: 'Empleada',
+      email: 'empleada@test.com',
+      active: true,
+      createdAt: new Date().toISOString(),
+    };
+    render(
+      <MemoryRouter initialEntries={['/']}>
+        <App />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText('Productos')).not.toBeInTheDocument();
   });
 });

@@ -10,7 +10,14 @@ export function Layout() {
         <div className="brand">SistemaGrido — Admin</div>
         <nav>
           <Link to="/">Inicio</Link>
-          {user?.roleCode === 'ADMIN' && <Link to="/usuarios">Usuarios</Link>}
+          {user?.roleCode === 'ADMIN' && (
+            <>
+              <Link to="/productos">Productos</Link>
+              <Link to="/categorias">Categorías</Link>
+              <Link to="/sabores">Sabores</Link>
+              <Link to="/usuarios">Usuarios</Link>
+            </>
+          )}
         </nav>
         <div className="who">
           <span>
