@@ -1,8 +1,9 @@
 # Invariantes del Motor de Inventario
 
 Contrato técnico del ledger de inventario (`InventoryMovement`), establecido
-en Etapa 3 y reforzado en Etapa 3.1 — ver `docs/ETAPA-3-MOTOR-INVENTARIO.md`
-y `docs/ETAPA-3.1-HARDENING-INVENTARIO.md` para el detalle completo. Toda
+en Etapa 3 y reforzado en Etapas 3.1 y 3.2 — ver
+`docs/ETAPA-3-MOTOR-INVENTARIO.md`, `docs/ETAPA-3.1-HARDENING-INVENTARIO.md`
+y `docs/ETAPA-3.2-IDEMPOTENCIA-CONCURRENTE.md` para el detalle completo. Toda
 etapa futura que toque stock (conteo, ventas, mermas, BOM, transferencias,
 cierre semanal) debe respetar estos invariantes; ninguna debe escribir stock
 por fuera de este ledger.
@@ -78,20 +79,37 @@ NOT NULL`, como garantía estructural final independiente del código de
    misma organización y están activos (`active = true`) — un maestro
    inactivo no admite nuevos movimientos, aunque conserva su historial.
 
-10. **Idempotencia semántica de eventos externos.** Un mismo
-    `idempotencyKey`, dentro de la misma organización, nunca genera dos
-    movimientos. Desde Etapa 3.1 esto se resuelve por identidad semántica
-    del payload, no sólo por la clave: al crear el movimiento se calcula un
-    fingerprint (`idempotencyFingerprint`) de sus campos relevantes
-    (`movementType`, `locationId`, `productId`, `enteredQuantity`, `reason`,
-    `occurredAt` — nunca datos generados por el servidor como timestamps de
-    auditoría). Un reintento legítimo con la misma clave y el mismo
-    fingerprint devuelve el movimiento ya creado, sin crear uno nuevo. Una
-    reutilización de la misma clave con un fingerprint distinto (payload
-    incompatible: otra cantidad, otro producto, etc.) NUNCA devuelve
-    silenciosamente el movimiento previo como si fuera equivalente — se
-    rechaza con `409 CONFLICT`. Ver
-    `docs/ETAPA-3.1-HARDENING-INVENTARIO.md`, sección 4.
+10. **Idempotencia semántica de eventos externos, también bajo
+    concurrencia: una `idempotencyKey` representa una única operación
+    semántica incluso cuando dos requests con esa clave llegan al mismo
+    tiempo.** Un mismo `idempotencyKey`, dentro de la misma organización,
+    nunca genera dos movimientos. Desde Etapa 3.1 esto se resuelve por
+    identidad semántica del payload, no sólo por la clave: al crear el
+    movimiento se calcula un fingerprint (`idempotencyFingerprint`) de sus
+    campos relevantes (`movementType`, `locationId`, `productId`,
+    `enteredQuantity`, `reason`, `occurredAt` — nunca datos generados por el
+    servidor como timestamps de auditoría). La regla es simétrica y vale
+    tanto para un retry secuencial como para dos requests genuinamente
+    concurrentes (Etapa 3.2):
+
+    - **mismo key + mismo fingerprint → mismo resultado**: se devuelve el
+      movimiento ya creado (o recién ganado por el otro request, si la
+      colisión ocurrió en paralelo), sin crear uno nuevo ni una segunda
+      auditoría, y sin responder un error genérico.
+    - **mismo key + fingerprint diferente → conflicto**: `409 CONFLICT`, la
+      clave nunca se reutiliza silenciosamente para una operación distinta,
+      sea el conflicto detectado antes de escribir (chequeo previo) o
+      después de que el `UNIQUE` de PostgreSQL rechazó un `INSERT`
+      concurrente.
+
+    El `UNIQUE` de PostgreSQL (`@@unique([organizationId, idempotencyKey])`)
+    sigue siendo la única fuente de verdad que decide, bajo carrera real,
+    cuál de dos escrituras concurrentes gana — la capa de aplicación sólo
+    decide cómo responderle al perdedor, distinguiendo por
+    `err.meta.target` cuál constraint se violó realmente (nunca asumiendo
+    que cualquier violación de unicidad es una colisión de idempotencia).
+    Ver `docs/ETAPA-3.1-HARDENING-INVENTARIO.md`, sección 4, y
+    `docs/ETAPA-3.2-IDEMPOTENCIA-CONCURRENTE.md` (completo).
 
 11. **Conversiones históricas preservadas.** `conversionFactor` se copia al
     movimiento en el momento de crearlo, desde `Product.

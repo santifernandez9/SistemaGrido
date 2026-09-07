@@ -28,6 +28,38 @@ function isUniqueConstraintError(err: unknown): boolean {
   return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
 }
 
+/**
+ * Etapa 3.2, corrección de "concurrencia en idempotencia". Un mismo INSERT de
+ * `InventoryMovement` puede violar MÁS DE UN índice único a la vez posible
+ * (idempotencyKey, o el índice parcial de stock inicial) -- capturar
+ * cualquier P2002 y asumir siempre la misma causa (como hacía Etapa 3.1) es
+ * exactamente el bug que señaló la auditoría: una colisión de
+ * `idempotencyKey` podía terminar reportada como "ya existe un stock
+ * inicial", o un P2002 genérico. `err.meta.target` de Prisma trae las
+ * columnas EXACTAS del índice/constraint que realmente disparó el error
+ * (incluso para los índices parciales agregados a mano en migraciones SQL,
+ * que Prisma no conoce por el schema declarativo) -- comparar contra esas
+ * columnas, nunca contra el código de error solo, es lo que permite
+ * distinguir con certeza cuál constraint fue.
+ */
+function isUniqueConstraintViolationOn(err: unknown, targetColumns: readonly string[]): boolean {
+  if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') {
+    return false;
+  }
+  const target = err.meta?.target;
+  if (!Array.isArray(target)) return false;
+  return (
+    target.length === targetColumns.length &&
+    targetColumns.every((column) => target.includes(column))
+  );
+}
+
+/** Columnas reales (snake_case) del `@@unique([organizationId, idempotencyKey])`. */
+const IDEMPOTENCY_KEY_UNIQUE_TARGET = ['organization_id', 'idempotency_key'] as const;
+
+/** Columnas reales del índice único parcial de stock inicial (ver migración de Etapa 3). */
+const INITIAL_STOCK_UNIQUE_TARGET = ['organization_id', 'location_id', 'product_id'] as const;
+
 const movementInclude = {
   location: { select: { name: true } },
   product: { select: { name: true, code: true } },
@@ -160,6 +192,59 @@ async function resolveIdempotency(
   if (!existing) return null;
   if (existing.idempotencyFingerprint === fingerprint) {
     return mapMovement(existing);
+  }
+  throw new ConflictError(
+    'Esta clave de idempotencia ya se usó con datos distintos (ubicación, producto, cantidad, motivo o fecha efectiva); no puede reutilizarse para una operación diferente.',
+  );
+}
+
+/**
+ * Etapa 3.2: se llama SOLO después de que un INSERT falló con P2002 sobre el
+ * UNIQUE de `idempotencyKey` (nunca ante cualquier P2002 -- ver
+ * `isUniqueConstraintViolationOn`). La única forma de llegar acá es que, entre
+ * el chequeo previo de `resolveIdempotency` (una simple lectura, sin lock) y
+ * este INSERT, otra transacción concurrente haya insertado primero un
+ * movimiento con la misma clave -- el escenario de carrera que describe el
+ * prompt de Etapa 3.2: "Request A busca key, no existe; Request B busca key,
+ * no existe; A inserta; B inserta". PostgreSQL ya garantizó que sólo una fila
+ * quedó insertada (el UNIQUE); acá sólo falta decidir qué responderle al
+ * request que perdió la carrera, aplicando EXACTAMENTE el mismo criterio de
+ * identidad semántica que un retry secuencial (mismo fingerprint):
+ *
+ * - Fingerprint igual al del ganador -> retry legítimo bajo concurrencia: se
+ *   devuelve el movimiento ya persistido, sin crear uno nuevo ni una segunda
+ *   auditoría (la transacción que perdió ya hizo ROLLBACK completo -- nunca
+ *   llegó a ejecutar `audit.logTx`, porque el `create` fue lo primero que
+ *   falló dentro de ella).
+ * - Fingerprint distinto -> conflicto real: la clave se reutilizó para una
+ *   operación distinta, `409 CONFLICT`, igual que el caso secuencial.
+ * - El movimiento no aparece al reconsultar (no debería poder pasar nunca,
+ *   dado que la propia constraint que disparó el P2002 garantiza que existe
+ *   una fila con esa clave): no se oculta como si fuera un retry exitoso ni
+ *   se deja escapar como 500 sin contexto -- se registra la situación en el
+ *   log y se responde un conflicto controlado, explícito, pidiendo reintentar.
+ */
+async function resolveIdempotencyConflictAfterRace(
+  fastify: FastifyInstance,
+  organizationId: string,
+  idempotencyKey: string,
+  fingerprint: string,
+): Promise<InventoryMovement> {
+  const winner = await fastify.db.inventoryMovement.findFirst({
+    where: { organizationId, idempotencyKey },
+    include: movementInclude,
+  });
+  if (!winner) {
+    fastify.log.error(
+      { organizationId, idempotencyKey },
+      'Etapa 3.2: colisión UNIQUE de idempotencyKey sin movimiento encontrado al reconsultar; condición de carrera irresoluble',
+    );
+    throw new ConflictError(
+      'No se pudo confirmar el resultado de esta operación por una condición de carrera inesperada; reintentá la solicitud con la misma clave de idempotencia.',
+    );
+  }
+  if (winner.idempotencyFingerprint === fingerprint) {
+    return mapMovement(winner);
   }
   throw new ConflictError(
     'Esta clave de idempotencia ya se usó con datos distintos (ubicación, producto, cantidad, motivo o fecha efectiva); no puede reutilizarse para una operación diferente.',
@@ -345,8 +430,31 @@ export async function createInitialStock(
       status: 'ACTIVE',
       reversesMovementId: null,
     },
+    include: movementInclude,
   });
   if (existingInitial) {
+    // Etapa 3.2: este chequeo también es una lectura sin lock -- exactamente
+    // igual de vulnerable a la carrera que el pre-check de idempotencyKey.
+    // Si dos requests concurrentes comparten `idempotencyKey` (y por lo
+    // tanto, al ser parte del mismo fingerprint, el mismo location/product),
+    // el que llega acá una vez que el otro YA COMMITEÓ puede encontrar el
+    // stock inicial recién creado por ese otro request y, sin esta
+    // distinción, lo reportaría como "ya existe stock inicial" -- un
+    // mensaje/código incorrecto para lo que en realidad es un retry
+    // idempotente legítimo. Se aplica el mismo criterio de identidad
+    // semántica que en cualquier otro punto de colisión de idempotencia:
+    // misma key + mismo fingerprint -> se devuelve el existente; misma key +
+    // fingerprint distinto -> conflicto de idempotencia (no de "duplicado").
+    // Sólo cuando el conflicto NO tiene relación con la key del request (key
+    // distinta o ausente) es genuinamente "otro stock inicial ya cargado".
+    if (input.idempotencyKey && existingInitial.idempotencyKey === input.idempotencyKey) {
+      if (existingInitial.idempotencyFingerprint === fingerprint) {
+        return mapMovement(existingInitial);
+      }
+      throw new ConflictError(
+        'Esta clave de idempotencia ya se usó con datos distintos (ubicación, producto, cantidad, motivo o fecha efectiva); no puede reutilizarse para una operación diferente.',
+      );
+    }
     throw new ConflictError(
       'Ya existe un stock inicial activo para este producto en esta ubicación. Si necesitás corregirlo, revertí el movimiento existente y cargá uno nuevo.',
     );
@@ -389,7 +497,21 @@ export async function createInitialStock(
       return mapMovement(created);
     });
   } catch (err) {
-    if (isUniqueConstraintError(err)) {
+    // Etapa 3.2: dos causas DISTINTAS pueden disparar P2002 acá -- nunca
+    // asumir cuál fue sin mirar `err.meta.target` (ver
+    // isUniqueConstraintViolationOn). Confundirlas es exactamente el bug
+    // señalado por la auditoría: una colisión de idempotencyKey reportada
+    // como "ya existe stock inicial" (o viceversa) sería un mensaje/código
+    // HTTP incorrecto para el caso real.
+    if (input.idempotencyKey && isUniqueConstraintViolationOn(err, IDEMPOTENCY_KEY_UNIQUE_TARGET)) {
+      return resolveIdempotencyConflictAfterRace(
+        fastify,
+        organizationId,
+        input.idempotencyKey,
+        fingerprint,
+      );
+    }
+    if (isUniqueConstraintViolationOn(err, INITIAL_STOCK_UNIQUE_TARGET)) {
       throw new ConflictError(
         'Ya existe un stock inicial activo para este producto en esta ubicación (detectado por la base de datos).',
       );
@@ -441,40 +563,57 @@ export async function createAdjustment(
   const conversionFactor = product.unitsPerHandlingUnit;
   const quantity = enteredQuantity.mul(conversionFactor);
 
-  return fastify.db.$transaction(async (tx) => {
-    const created = await tx.inventoryMovement.create({
-      data: {
+  try {
+    return await fastify.db.$transaction(async (tx) => {
+      const created = await tx.inventoryMovement.create({
+        data: {
+          organizationId,
+          locationId: input.locationId,
+          productId: input.productId,
+          movementType: 'ADJUSTMENT',
+          quantity,
+          enteredQuantity,
+          entryUnitOfMeasureId: product.unitOfMeasureId,
+          conversionFactor,
+          reason,
+          occurredAt: input.occurredAt ? new Date(input.occurredAt) : undefined,
+          idempotencyKey: input.idempotencyKey ?? null,
+          idempotencyFingerprint: input.idempotencyKey ? fingerprint : null,
+          createdById: actor.id,
+        },
+        include: movementInclude,
+      });
+
+      await fastify.audit.logTx(tx, {
         organizationId,
-        locationId: input.locationId,
-        productId: input.productId,
-        movementType: 'ADJUSTMENT',
-        quantity,
-        enteredQuantity,
-        entryUnitOfMeasureId: product.unitOfMeasureId,
-        conversionFactor,
+        userId: actor.id,
+        roleCode: actor.roleCode,
+        action: 'INVENTORY_ADJUSTMENT_CREATED',
+        module: 'INVENTORY',
+        entityType: 'inventory_movement',
+        entityId: created.id,
+        afterValue: mapMovement(created),
         reason,
-        occurredAt: input.occurredAt ? new Date(input.occurredAt) : undefined,
-        idempotencyKey: input.idempotencyKey ?? null,
-        idempotencyFingerprint: input.idempotencyKey ? fingerprint : null,
-        createdById: actor.id,
-      },
-      include: movementInclude,
-    });
+      });
 
-    await fastify.audit.logTx(tx, {
-      organizationId,
-      userId: actor.id,
-      roleCode: actor.roleCode,
-      action: 'INVENTORY_ADJUSTMENT_CREATED',
-      module: 'INVENTORY',
-      entityType: 'inventory_movement',
-      entityId: created.id,
-      afterValue: mapMovement(created),
-      reason,
+      return mapMovement(created);
     });
-
-    return mapMovement(created);
-  });
+  } catch (err) {
+    // Etapa 3.2: mismo patrón que createInitialStock -- un ajuste sólo tiene
+    // un UNIQUE relevante posible (idempotencyKey), pero igual se valida por
+    // `target` en vez de asumir "cualquier P2002 es esto", para no ocultar
+    // silenciosamente una causa real distinta si el esquema cambiara en el
+    // futuro.
+    if (input.idempotencyKey && isUniqueConstraintViolationOn(err, IDEMPOTENCY_KEY_UNIQUE_TARGET)) {
+      return resolveIdempotencyConflictAfterRace(
+        fastify,
+        organizationId,
+        input.idempotencyKey,
+        fingerprint,
+      );
+    }
+    throw err;
+  }
 }
 
 /**

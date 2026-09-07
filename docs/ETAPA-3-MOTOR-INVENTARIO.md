@@ -363,6 +363,18 @@ queda listo para cuando existan importadores/ventas/cierres automáticos.
 > fingerprint distinto es un conflicto real (`409 CONFLICT`, no se crea
 > movimiento). Ver `docs/ETAPA-3.1-HARDENING-INVENTARIO.md`, sección 4.
 
+> **Corregido en Etapa 3.2**: la corrección de Etapa 3.1 resolvía
+> correctamente el retry secuencial, pero el chequeo previo de
+> `idempotencyKey` es una simple lectura sin lock — dos requests con la
+> misma clave llegando de forma realmente concurrente podían ambos superar
+> ese chequeo antes de que cualquiera insertara, y el que perdía la carrera
+> del `UNIQUE` de PostgreSQL podía terminar recibiendo un error incorrecto en
+> vez de comportarse como el retry idempotente que en realidad es (o,
+> específicamente en `createInitialStock`, confundirse con "ya existe un
+> stock inicial"). Corregido capturando la violación de unicidad
+> específicamente por `err.meta.target` y resolviendo por el mismo
+> fingerprint. Ver `docs/ETAPA-3.2-IDEMPOTENCIA-CONCURRENTE.md`.
+
 ---
 
 ## 15. Concurrencia
@@ -665,6 +677,10 @@ monorepo: 120 (Etapa 2.1: `packages/db` 10 + `apps/admin-web` 16 +
 > **Etapa 3.1** agregó 14 tests más sobre esta base (163 → 177), sin
 > modificar ni deshabilitar ninguno de los 163 — ver
 > `docs/ETAPA-3.1-HARDENING-INVENTARIO.md`, sección 7, para el detalle.
+>
+> **Etapa 3.2** agregó 4 tests más (177 → 181), sin modificar ni deshabilitar
+> ninguno de los 177 — ver `docs/ETAPA-3.2-IDEMPOTENCIA-CONCURRENTE.md`,
+> sección 10.
 
 ---
 
@@ -719,6 +735,12 @@ estructura que no fuera imprescindible para el motor actual.
 > `docs/ETAPA-3.1-HARDENING-INVENTARIO.md` para el detalle completo y sus
 > propios pendientes (entre ellos, protección de `DELETE` a nivel de rol de
 > base de datos, documentada como pendiente técnico explícito).
+>
+> **Etapa 3.2** cerró el único hardening técnico restante señalado por la
+> auditoría de Etapa 3.1: la idempotencia no garantizaba un comportamiento
+> correcto bajo concurrencia real (sólo bajo retries secuenciales) — ver
+> `docs/ETAPA-3.2-IDEMPOTENCIA-CONCURRENTE.md`. Sin pendientes bloqueantes
+> ni no bloqueantes nuevos.
 
 **Futuros**:
 

@@ -1006,4 +1006,197 @@ describe('/api/inventory', () => {
       expect(retry.statusCode).toBe(201);
     });
   });
+
+  describe('idempotencia concurrente (Etapa 3.2)', () => {
+    // No son tests secuenciales (create(); create();) -- el chequeo previo de
+    // resolveIdempotency es sólo una lectura sin lock, así que la única forma
+    // de ejercitar de verdad la carrera que describe el prompt de Etapa 3.2
+    // ("Request A busca key, no existe; Request B busca key, no existe; A
+    // inserta; B inserta") es disparar ambos requests con Promise.all contra
+    // el mismo Postgres real.
+
+    it('TEST 1 -- dos ajustes concurrentes, misma idempotencyKey y mismo payload: exactamente un movimiento, ambos resuelven idempotente', async () => {
+      const payload = {
+        locationId: locationA,
+        productId: productLata,
+        enteredQuantity: '7',
+        reason: 'Ingreso detectado por conciliación automática',
+        idempotencyKey: 'concurrente-ajuste-identico',
+      };
+
+      const [responseA, responseB] = await Promise.all([
+        app.inject({
+          method: 'POST',
+          url: '/api/inventory/adjustments',
+          headers: adminAuthHeader,
+          payload,
+        }),
+        app.inject({
+          method: 'POST',
+          url: '/api/inventory/adjustments',
+          headers: adminAuthHeader,
+          payload,
+        }),
+      ]);
+
+      // Ninguno de los dos responde error interno ni error genérico: ambos
+      // deben comportarse como un retry idempotente exitoso.
+      expect(responseA.statusCode).toBe(201);
+      expect(responseB.statusCode).toBe(201);
+      expect(responseA.json().data.id).toBe(responseB.json().data.id);
+
+      const movements = await prisma.inventoryMovement.count({
+        where: { organizationId, idempotencyKey: 'concurrente-ajuste-identico' },
+      });
+      expect(movements).toBe(1);
+
+      // El stock se afectó una única vez (7), no dos veces (14).
+      const stock = await app.inject({
+        method: 'GET',
+        url: `/api/inventory/stock?locationId=${locationA}&productId=${productLata}`,
+        headers: adminAuthHeader,
+      });
+      expect(stock.json().data[0].quantity).toBe('7.000');
+
+      // Y una única auditoría -- el request que perdió la carrera nunca
+      // llegó a ejecutar audit.logTx (su transacción abortó en el propio
+      // INSERT, antes de auditar nada).
+      const auditRows = await prisma.auditLog.count({
+        where: { organizationId, action: 'INVENTORY_ADJUSTMENT_CREATED' },
+      });
+      expect(auditRows).toBe(1);
+    });
+
+    it('TEST 2 -- dos ajustes concurrentes, misma idempotencyKey y payload distinto: un movimiento persistido, el otro request en conflicto', async () => {
+      const key = 'concurrente-ajuste-incompatible';
+      const [responseA, responseB] = await Promise.all([
+        app.inject({
+          method: 'POST',
+          url: '/api/inventory/adjustments',
+          headers: adminAuthHeader,
+          payload: {
+            locationId: locationA,
+            productId: productLata,
+            enteredQuantity: '7',
+            reason: 'Ingreso detectado por conciliación automática',
+            idempotencyKey: key,
+          },
+        }),
+        app.inject({
+          method: 'POST',
+          url: '/api/inventory/adjustments',
+          headers: adminAuthHeader,
+          payload: {
+            locationId: locationA,
+            productId: productLata,
+            enteredQuantity: '9', // cantidad distinta -- misma key, operación incompatible
+            reason: 'Ingreso detectado por conciliación automática',
+            idempotencyKey: key,
+          },
+        }),
+      ]);
+
+      // No se asume cuál request gana: sólo que exactamente uno persiste y
+      // el otro queda en conflicto (nunca ambos 201, nunca ambos error).
+      const statusCodes = [responseA.statusCode, responseB.statusCode].sort();
+      expect(statusCodes).toEqual([201, 409]);
+      const conflicting = responseA.statusCode === 409 ? responseA : responseB;
+      expect(conflicting.json().error.code).toBe('CONFLICT');
+
+      const movements = await prisma.inventoryMovement.findMany({
+        where: { organizationId, idempotencyKey: key },
+      });
+      expect(movements).toHaveLength(1);
+
+      // El stock refleja UNA sola de las dos cantidades, nunca ambas sumadas.
+      const stock = await app.inject({
+        method: 'GET',
+        url: `/api/inventory/stock?locationId=${locationA}&productId=${productLata}`,
+        headers: adminAuthHeader,
+      });
+      expect(['7.000', '9.000']).toContain(stock.json().data[0].quantity);
+    });
+
+    it('TEST 3 -- stock inicial: un retry concurrente idéntico (misma idempotencyKey) no se confunde con "stock inicial ya cargado"', async () => {
+      const payload = {
+        locationId: locationA,
+        productId: productLata,
+        enteredQuantity: '10',
+        idempotencyKey: 'concurrente-stock-inicial-identico',
+      };
+
+      const [responseA, responseB] = await Promise.all([
+        app.inject({
+          method: 'POST',
+          url: '/api/inventory/stock/initial',
+          headers: adminAuthHeader,
+          payload,
+        }),
+        app.inject({
+          method: 'POST',
+          url: '/api/inventory/stock/initial',
+          headers: adminAuthHeader,
+          payload,
+        }),
+      ]);
+
+      // Ninguno de los dos debe recibir el mensaje de "ya existe un stock
+      // inicial activo" -- eso sería confundir la colisión de idempotencyKey
+      // con la regla de stock inicial único (justamente el bug de Etapa 3.2).
+      expect(responseA.statusCode).toBe(201);
+      expect(responseB.statusCode).toBe(201);
+      expect(responseA.json().data.id).toBe(responseB.json().data.id);
+
+      const initialStocks = await prisma.inventoryMovement.count({
+        where: {
+          organizationId,
+          locationId: locationA,
+          productId: productLata,
+          movementType: 'INITIAL_STOCK',
+        },
+      });
+      expect(initialStocks).toBe(1);
+    });
+
+    it('TEST 4 -- una violación UNIQUE distinta a idempotencyKey (stock inicial duplicado, sin key) no se absorbe como retry', async () => {
+      // Dos altas de stock inicial CONCURRENTES, sin idempotencyKey, para el
+      // mismo producto/ubicación: la única constraint que puede dispararse
+      // acá es la del índice único parcial de INITIAL_STOCK -- nunca la de
+      // idempotencyKey (ninguno de los dos requests manda una). Confirma que
+      // isUniqueConstraintViolationOn distingue correctamente el target real
+      // en vez de tratar cualquier P2002 como colisión de idempotencia.
+      const payload = { locationId: locationA, productId: productLata, enteredQuantity: '10' };
+
+      const [responseA, responseB] = await Promise.all([
+        app.inject({
+          method: 'POST',
+          url: '/api/inventory/stock/initial',
+          headers: adminAuthHeader,
+          payload,
+        }),
+        app.inject({
+          method: 'POST',
+          url: '/api/inventory/stock/initial',
+          headers: adminAuthHeader,
+          payload,
+        }),
+      ]);
+
+      const statusCodes = [responseA.statusCode, responseB.statusCode].sort();
+      expect(statusCodes).toEqual([201, 409]);
+      const conflicting = responseA.statusCode === 409 ? responseA : responseB;
+      // El mensaje debe ser el de stock inicial duplicado, no uno de idempotencia.
+      expect(conflicting.json().error.message).toMatch(/stock inicial/i);
+
+      const initialStocks = await prisma.inventoryMovement.count({
+        where: {
+          organizationId,
+          locationId: locationA,
+          productId: productLata,
+          movementType: 'INITIAL_STOCK',
+        },
+      });
+      expect(initialStocks).toBe(1);
+    });
+  });
 });

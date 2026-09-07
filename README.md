@@ -5,20 +5,24 @@ Sistema de control de stock, caja y rentabilidad para Heladerías Grido
 administración y app operativa PWA para heladería/depósito) y paquetes
 compartidos.
 
-> Este repositorio está en **Etapa 3.1 — Hardening del Motor de Inventario**:
-> además de la base técnica (auth, usuarios, roles, auditoría) y el catálogo
-> (Productos, Categorías, Sabores, con aislamiento multi-organización
-> garantizado también en PostgreSQL), ya existe el ledger append-only de
-> movimientos de inventario -- el stock nunca se edita directamente, siempre
-> es la suma de sus movimientos -- con stock inicial, ajustes y reversiones
-> operables desde el panel de Admin. Etapa 3.1 corrigió cuatro problemas
-> técnicos señalados por la auditoría externa de Etapa 3 (reversión
-> concurrente, precisión decimal, idempotencia semántica, `eslint-disable`)
-> sin rediseñar lo que ya funcionaba. Todavía no implementa la experiencia
+> Este repositorio está en **Etapa 3.2 — Cierre de concurrencia en
+> idempotencia**: además de la base técnica (auth, usuarios, roles,
+> auditoría) y el catálogo (Productos, Categorías, Sabores, con aislamiento
+> multi-organización garantizado también en PostgreSQL), ya existe el ledger
+> append-only de movimientos de inventario -- el stock nunca se edita
+> directamente, siempre es la suma de sus movimientos -- con stock inicial,
+> ajustes y reversiones operables desde el panel de Admin. Etapa 3.1 corrigió
+> cuatro problemas técnicos señalados por la auditoría externa de Etapa 3
+> (reversión concurrente, precisión decimal, idempotencia semántica,
+> `eslint-disable`); Etapa 3.2 cerró el único hardening técnico restante: la
+> idempotencia ahora garantiza el mismo resultado (mismo movimiento o
+> conflicto explícito) también bajo requests genuinamente concurrentes, no
+> sólo en retries secuenciales. Todavía no implementa la experiencia
 > operativa de la heladería (conteo semanal, mermas, baja de lata, ventas,
 > caja, cierres, transferencias, etc.) — ver
 > [`docs/ETAPA-3-MOTOR-INVENTARIO.md`](docs/ETAPA-3-MOTOR-INVENTARIO.md),
-> [`docs/ETAPA-3.1-HARDENING-INVENTARIO.md`](docs/ETAPA-3.1-HARDENING-INVENTARIO.md)
+> [`docs/ETAPA-3.1-HARDENING-INVENTARIO.md`](docs/ETAPA-3.1-HARDENING-INVENTARIO.md),
+> [`docs/ETAPA-3.2-IDEMPOTENCIA-CONCURRENTE.md`](docs/ETAPA-3.2-IDEMPOTENCIA-CONCURRENTE.md)
 > y [`docs/INVARIANTES-INVENTARIO.md`](docs/INVARIANTES-INVENTARIO.md) para
 > el detalle completo de qué se construyó y qué queda explícitamente
 > pendiente.
@@ -34,6 +38,7 @@ compartidos.
 - [`docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md`](docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md) — foreign keys compuestas para garantizar el aislamiento multi-organización del catálogo a nivel de PostgreSQL.
 - [`docs/ETAPA-3-MOTOR-INVENTARIO.md`](docs/ETAPA-3-MOTOR-INVENTARIO.md) — ledger de movimientos de inventario, stock teórico, ajustes, reversiones, auditoría transaccional.
 - [`docs/ETAPA-3.1-HARDENING-INVENTARIO.md`](docs/ETAPA-3.1-HARDENING-INVENTARIO.md) — hardening del motor de inventario: reversión concurrente, precisión decimal, idempotencia semántica, `eslint-disable`.
+- [`docs/ETAPA-3.2-IDEMPOTENCIA-CONCURRENTE.md`](docs/ETAPA-3.2-IDEMPOTENCIA-CONCURRENTE.md) — cierre del hardening de idempotencia bajo concurrencia real (manejo específico de violaciones UNIQUE por `idempotencyKey`).
 - [`docs/INVARIANTES-INVENTARIO.md`](docs/INVARIANTES-INVENTARIO.md) — contrato técnico corto del motor de inventario, para etapas futuras.
 
 ## Estructura del monorepo
@@ -126,32 +131,37 @@ vincula al sistema — no hay seed de usuarios reales (ver
 
 ## Tests y CI
 
-177 tests (Vitest) en 24 archivos, backend y ambos frontends. Los tests de
+181 tests (Vitest) en 24 archivos, backend y ambos frontends. Los tests de
 `apps/api` corren contra una base PostgreSQL real (no mockeada), incluyendo
 tests de integridad a nivel de base de datos que bypasean la API para
 confirmar el aislamiento multi-organización (Etapa 2.1), las garantías del
 ledger de inventario (Etapa 3: FKs compuestas, CHECK constraints, índice
-único de stock inicial, idempotencia) y su hardening (Etapa 3.1: reversión
+único de stock inicial, idempotencia), su hardening (Etapa 3.1: reversión
 concurrente real, precisión decimal, idempotencia semántica, protección del
-ledger contra `UPDATE` destructivo). CI en GitHub Actions
+ledger contra `UPDATE` destructivo) y el cierre de concurrencia en
+idempotencia (Etapa 3.2: retries y conflictos de `idempotencyKey` resueltos
+correctamente también bajo requests realmente concurrentes, con
+`Promise.all` contra Postgres real). CI en GitHub Actions
 (`.github/workflows/ci.yml`): instala, genera y migra la base contra un
 Postgres de servicio, y corre lint, formato, typecheck, tests y build en
 cada push/PR — sin ningún paso de deploy. Ver detalle en
 `docs/ETAPA-1-BASE-CORE.md`, secciones 16 y 17,
 `docs/ETAPA-2-CATALOGO-MAESTROS.md`, sección 14,
 `docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md`, secciones 9 a 11,
-`docs/ETAPA-3-MOTOR-INVENTARIO.md`, sección 23, y
-`docs/ETAPA-3.1-HARDENING-INVENTARIO.md`, sección 7.
+`docs/ETAPA-3-MOTOR-INVENTARIO.md`, sección 23,
+`docs/ETAPA-3.1-HARDENING-INVENTARIO.md`, sección 7, y
+`docs/ETAPA-3.2-IDEMPOTENCIA-CONCURRENTE.md`, sección 10.
 
 ## Estado del proyecto
 
-Etapa 3.1 (Hardening del Motor de Inventario) completa, pendiente de
+Etapa 3.2 (Cierre de concurrencia en idempotencia) completa, pendiente de
 auditoría externa antes de avanzar a la siguiente etapa. El sistema tiene
 base técnica, gestión de usuarios, catálogo (con aislamiento
 multi-organización garantizado en PostgreSQL) y el ledger central de
 inventario -- stock teórico siempre calculado desde los movimientos, nunca
 un valor editable, con stock inicial/ajustes/reversiones operables desde el
 panel de Admin, reversión protegida ante concurrencia real, cantidades como
-string decimal de punta a punta e idempotencia semántica por fingerprint;
-todavía no hay experiencia operativa de heladería (conteo, mermas, ventas,
-caja, cierres, transferencias, etc.).
+string decimal de punta a punta e idempotencia semántica por fingerprint que
+ahora también resuelve correctamente bajo colisiones concurrentes; todavía
+no hay experiencia operativa de heladería (conteo, mermas, ventas, caja,
+cierres, transferencias, etc.).
