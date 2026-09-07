@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
-import { MOVEMENT_TYPES } from '@sistema-grido/shared-types';
+import { DECIMAL_QUANTITY_PATTERN, MOVEMENT_TYPES } from '@sistema-grido/shared-types';
 import type {
   ApiSuccess,
   InventoryMovement,
@@ -37,10 +37,27 @@ const movementsQuerySchema = z.object({
 
 const idParamsSchema = z.object({ id: z.string().uuid() });
 
+/**
+ * Cantidad decimal como STRING (Etapa 3.1, corrección del Problema 2: "no
+ * utilizar float de JavaScript como representación intermedia de cantidades
+ * que requieran precisión"). Sólo valida el FORMATO acá (signo opcional,
+ * hasta 3 decimales, misma escala que NUMERIC(14,3)) -- el signo/cero se
+ * valida contra la operación concreta en el servicio
+ * (apps/api/src/services/inventory-ledger.ts), usando `Prisma.Decimal`
+ * directamente sobre el string, nunca `Number(...)`.
+ */
+const decimalQuantitySchema = z
+  .string()
+  .trim()
+  .regex(
+    DECIMAL_QUANTITY_PATTERN,
+    'Cantidad inválida: debe ser un número decimal (opcionalmente negativo) con hasta 3 decimales, ej. "12.375"',
+  );
+
 const createInitialStockSchema = z.object({
   locationId: z.string().uuid(),
   productId: z.string().uuid(),
-  enteredQuantity: z.number().positive(),
+  enteredQuantity: decimalQuantitySchema,
   occurredAt: isoDate.optional(),
   idempotencyKey: z.string().min(1).optional(),
 });
@@ -48,7 +65,7 @@ const createInitialStockSchema = z.object({
 const createAdjustmentSchema = z.object({
   locationId: z.string().uuid(),
   productId: z.string().uuid(),
-  enteredQuantity: z.number().refine((v) => v !== 0, 'La cantidad no puede ser cero'),
+  enteredQuantity: decimalQuantitySchema,
   reason: z.string().min(1, 'El ajuste requiere un motivo'),
   occurredAt: isoDate.optional(),
   idempotencyKey: z.string().min(1).optional(),

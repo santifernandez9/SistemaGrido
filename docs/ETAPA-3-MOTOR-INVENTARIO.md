@@ -11,6 +11,19 @@ Rama: `claude/etapa-3-motor-inventario` (derivada del commit aprobado
 > completa de la heladería (conteo semanal, mermas con foto, baja de lata,
 > ventas, caja, cierres, transferencias, etc.) — ver sección 25,
 > "Limitaciones", y sección 26, "Pendientes".
+>
+> **Actualización — Etapa 3.1**: la auditoría externa de Etapa 3 dio
+> veredicto B (parcial) y señaló cuatro problemas técnicos puntuales, ya
+> corregidos en Etapa 3.1 sin rediseñar lo que ya funcionaba: la protección
+> de doble reversión ante concurrencia real (secciones 13 y 15, abajo),
+> `enteredQuantity` viajando como string decimal en vez de `number` de JS
+> (sección 8), idempotencia semántica por fingerprint en vez de sólo por
+> clave (sección 14), y la eliminación de los `eslint-disable` introducidos
+> en esta etapa. Este documento se deja tal como se escribió al cierre de
+> Etapa 3, con una nota en cada sección afectada — el detalle completo de
+> qué cambió y por qué está en
+> `docs/ETAPA-3.1-HARDENING-INVENTARIO.md`; los invariantes vigentes,
+> actualizados, están en `docs/INVARIANTES-INVENTARIO.md`.
 
 ---
 
@@ -192,6 +205,17 @@ CHECK adicionales en base de datos (sección 22): `quantity <> 0`,
 `entered_quantity <> 0`, `conversion_factor > 0` — un movimiento de
 cantidad cero no representa ningún hecho real.
 
+> **Corregido en Etapa 3.1**: el contrato de esta sección describía sólo el
+> lado de salida (API → frontend). El lado de entrada (frontend → API →
+> Prisma) sí pasaba por `number` de JavaScript (`z.number()` en el schema
+> de Zod, `valueAsNumber` en el input del formulario) antes de llegar a
+> `new Prisma.Decimal(...)`, lo cual podía perder precisión antes de
+> persistir. Corregido: `enteredQuantity` viaja como string decimal
+> validado (`DECIMAL_QUANTITY_PATTERN`) de punta a punta, y se construye con
+> `new Prisma.Decimal(input)` directamente sobre el string — nunca
+> `new Prisma.Decimal(Number(input))`. Ver
+> `docs/ETAPA-3.1-HARDENING-INVENTARIO.md`, sección 3.
+
 ---
 
 ## 9. Unidades y normalización
@@ -302,6 +326,18 @@ movimiento, no sólo `INITIAL_STOCK`/`ADJUSTMENT`):
 **Doble reversión bloqueada**: revertir un movimiento ya `REVERSED` se
 rechaza con `409 CONFLICT` (test cubierto, sección 23).
 
+> **Corregido en Etapa 3.1**: el paso 1 (verificar `status === 'ACTIVE'`
+> antes de empezar) era sólo un atajo — bajo dos solicitudes de reversión
+> genuinamente concurrentes sobre el mismo movimiento, ambas podían pasar
+> esa verificación antes de que la primera confirmara. La protección real
+> pasó a ser el propio `UPDATE` del paso 2, hecho condicional
+> (`WHERE id = $1 AND status = 'ACTIVE'`) dentro de la transacción, más un
+> índice único parcial en PostgreSQL
+> (`inventory_movement_unique_reversal_per_original`) como capa
+> estructural final. Verificado con un test que dispara dos reversiones
+> realmente concurrentes (`Promise.all`) contra el servicio real. Ver
+> `docs/ETAPA-3.1-HARDENING-INVENTARIO.md`, sección 2.
+
 ---
 
 ## 14. Idempotencia
@@ -316,6 +352,16 @@ aceptan un `idempotencyKey` opcional: si se reenvía el mismo valor para la
 misma organización, se devuelve el movimiento ya creado en vez de duplicar
 (comportamiento verificado con test, sección 23) — el mecanismo general
 queda listo para cuando existan importadores/ventas/cierres automáticos.
+
+> **Corregido en Etapa 3.1**: "se reenvía el mismo valor" se interpretaba
+> únicamente por la clave — reutilizar la misma `idempotencyKey` con un
+> payload distinto (otra cantidad, otro producto) devolvía silenciosamente
+> el movimiento previo, como si ambas operaciones fueran equivalentes.
+> Corregido con un fingerprint de los campos semánticamente relevantes del
+> payload (`idempotencyFingerprint`): mismo key + mismo fingerprint es un
+> retry legítimo (se devuelve el movimiento existente); mismo key +
+> fingerprint distinto es un conflicto real (`409 CONFLICT`, no se crea
+> movimiento). Ver `docs/ETAPA-3.1-HARDENING-INVENTARIO.md`, sección 4.
 
 ---
 
@@ -338,6 +384,18 @@ concurrentes gana. No se implementó ningún mecanismo de lock adicional (ej.
 volumen de escritura de esta etapa es bajo (altas manuales de un Admin) y el
 único invariante realmente en riesgo de carrera ya está cubierto por el
 índice.
+
+> **Corregido en Etapa 3.1**: esta sección subestimó un segundo punto de
+> carrera real — la reversión (sección 13). A diferencia de `INITIAL_STOCK`
+> (protegido de punta a punta por el índice único parcial desde esta
+> misma etapa), `reverseMovement` sólo tenía la verificación previa de
+> `status`, sin `UPDATE` condicional ni índice equivalente, así que dos
+> reversiones concurrentes sobre el mismo movimiento sí podían competir.
+> Corregido en Etapa 3.1 con el mismo patrón ya usado acá para
+> `INITIAL_STOCK`: `UPDATE` atómico condicional dentro de una transacción
+> más un índice único parcial (`inventory_movement_unique_reversal_per_original`)
+> como garantía final. Ver `docs/ETAPA-3.1-HARDENING-INVENTARIO.md`,
+> sección 2.
 
 ---
 
@@ -444,6 +502,11 @@ ubicación restringido para los últimos dos):
 No se implementan endpoints operativos de merma/pesaje/baja de lata/venta/
 remito/transferencia (explícitamente fuera de Etapa 3).
 
+> **Corregido en Etapa 3.1**: `enteredQuantity` en ambos `POST` pasó de
+> `number` JSON (ej. `{"enteredQuantity": 12.375}`) a string decimal (ej.
+> `{"enteredQuantity": "12.375"}`) — ver sección 8 y
+> `docs/ETAPA-3.1-HARDENING-INVENTARIO.md`, sección 3.
+
 ---
 
 ## 20. Admin Web
@@ -494,6 +557,12 @@ En `inventory_movement`:
 No se agregaron índices sobre columnas que ningún filtro de esta etapa usa
 (ej. `createdBy` en solitario, `reason`) — evitando sobreindexar sin
 justificación, tal como pide la sección 29 del prompt.
+
+> **Etapa 3.1** agregó un índice único parcial más, en una migración nueva
+> separada (no se editó ésta): `inventory_movement_unique_reversal_per_original`
+> sobre `(organization_id, reverses_movement_id) WHERE reverses_movement_id
+IS NOT NULL` — ver sección 13/15 de este documento y
+> `docs/ETAPA-3.1-HARDENING-INVENTARIO.md`, sección 6.
 
 ---
 
@@ -593,6 +662,10 @@ Total en `apps/api`: 90 (Etapa 2.1) + 43 nuevos = **133**, 0 fallos. Total del
 monorepo: 120 (Etapa 2.1: `packages/db` 10 + `apps/admin-web` 16 +
 `apps/api` 90 + `apps/shop-pwa` 4) + 43 nuevos = **163**, 0 fallos.
 
+> **Etapa 3.1** agregó 14 tests más sobre esta base (163 → 177), sin
+> modificar ni deshabilitar ninguno de los 163 — ver
+> `docs/ETAPA-3.1-HARDENING-INVENTARIO.md`, sección 7, para el detalle.
+
 ---
 
 ## 24. Resultado CI
@@ -639,6 +712,13 @@ estructura que no fuera imprescindible para el motor actual.
 - Ninguno detectado en esta etapa (el único pendiente heredado de Etapa 2.1
   — las FKs de `AppUser`/`AuditLog` — se corrigió en esta misma etapa, ver
   sección 16).
+
+> **Etapa 3.1** encontró y corrigió los 4 problemas técnicos señalados por
+> la auditoría externa de esta etapa (reversión concurrente, precisión
+> decimal, idempotencia semántica, `eslint-disable`) — ver
+> `docs/ETAPA-3.1-HARDENING-INVENTARIO.md` para el detalle completo y sus
+> propios pendientes (entre ellos, protección de `DELETE` a nivel de rol de
+> base de datos, documentada como pendiente técnico explícito).
 
 **Futuros**:
 

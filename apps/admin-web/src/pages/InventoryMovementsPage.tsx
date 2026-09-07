@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth, ApiClientError } from '@sistema-grido/auth-client';
 import {
   MOVEMENT_TYPES,
@@ -54,16 +54,16 @@ export function InventoryMovementsPage() {
   const [reverseSubmitting, setReverseSubmitting] = useState(false);
   const [reverseError, setReverseError] = useState<string | null>(null);
 
-  async function loadMasters() {
+  const loadMasters = useCallback(async () => {
     const [locationsData, productsData] = await Promise.all([
       api.get<LocationSummary[]>('/api/locations'),
       api.get<Product[]>('/api/products'),
     ]);
     setLocations(locationsData);
     setProducts(productsData);
-  }
+  }, [api]);
 
-  async function loadMovements() {
+  const loadMovements = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -82,17 +82,19 @@ export function InventoryMovementsPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [api, locationFilter, productFilter, typeFilter, fromFilter, toFilter, pageNumber]);
 
+  // Sin eslint-disable: `loadMasters`/`loadMovements` sólo cambian de
+  // identidad cuando sus propias dependencias cambian (useCallback), así
+  // que el efecto se re-ejecuta exactamente cuando corresponde sin
+  // necesitar la excepción del linter (Etapa 3.1, corrección del Problema 4).
   useEffect(() => {
     void loadMasters();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadMasters]);
 
   useEffect(() => {
     void loadMovements();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locationFilter, productFilter, typeFilter, fromFilter, toFilter, pageNumber]);
+  }, [loadMovements]);
 
   // Cualquier cambio de filtro vuelve a la página 1 (evita quedar en una página vacía).
   useEffect(() => {

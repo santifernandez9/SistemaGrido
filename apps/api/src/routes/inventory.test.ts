@@ -133,7 +133,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: employeeAuthHeader,
-        payload: { locationId: locationB, productId: productLata, enteredQuantity: 10 },
+        payload: { locationId: locationB, productId: productLata, enteredQuantity: '10' },
       });
       expect(response.statusCode).toBe(403);
     });
@@ -144,7 +144,12 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/adjustments',
         headers: depositAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 1, reason: 'x' },
+        payload: {
+          locationId: locationA,
+          productId: productLata,
+          enteredQuantity: '1',
+          reason: 'x',
+        },
       });
       expect(response.statusCode).toBe(403);
     });
@@ -154,7 +159,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 10 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
       });
 
       asEmployee();
@@ -190,7 +195,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 10 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
       });
       expect(response.statusCode).toBe(201);
       const created = response.json().data;
@@ -212,13 +217,13 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 10 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
       });
       const response = await app.inject({
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 5 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '5' },
       });
       expect(response.statusCode).toBe(409);
       expect(response.json().error.code).toBe('CONFLICT');
@@ -229,7 +234,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 0 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '0' },
       });
       expect(response.statusCode).toBe(400);
     });
@@ -239,7 +244,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productCaja, enteredQuantity: 2 },
+        payload: { locationId: locationA, productId: productCaja, enteredQuantity: '2' },
       });
       expect(response.statusCode).toBe(201);
       const created = response.json().data;
@@ -253,7 +258,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productCaja, enteredQuantity: 2 },
+        payload: { locationId: locationA, productId: productCaja, enteredQuantity: '2' },
       });
       const firstMovement = first.json().data;
       expect(firstMovement.quantity).toBe('24.000');
@@ -281,7 +286,7 @@ describe('/api/inventory', () => {
         payload: {
           locationId: locationA,
           productId: productCaja,
-          enteredQuantity: 1,
+          enteredQuantity: '1',
           reason: 'Ingreso adicional',
         },
       });
@@ -293,7 +298,7 @@ describe('/api/inventory', () => {
       const payload = {
         locationId: locationA,
         productId: productLata,
-        enteredQuantity: 10,
+        enteredQuantity: '10',
         idempotencyKey: 'evento-externo-123',
       };
       const first = await app.inject({
@@ -317,6 +322,147 @@ describe('/api/inventory', () => {
       });
       expect(count).toBe(1);
     });
+
+    it('idempotencia semántica: reutilizar la clave con un payload distinto es un conflicto (409), no un retry silencioso', async () => {
+      const first = await app.inject({
+        method: 'POST',
+        url: '/api/inventory/stock/initial',
+        headers: adminAuthHeader,
+        payload: {
+          locationId: locationA,
+          productId: productLata,
+          enteredQuantity: '10',
+          idempotencyKey: 'evento-externo-456',
+        },
+      });
+      expect(first.statusCode).toBe(201);
+
+      // Misma key, distinta cantidad -- no puede ser "la misma operación reenviada".
+      const conflicting = await app.inject({
+        method: 'POST',
+        url: '/api/inventory/stock/initial',
+        headers: adminAuthHeader,
+        payload: {
+          locationId: locationA,
+          productId: productLata,
+          enteredQuantity: '50',
+          idempotencyKey: 'evento-externo-456',
+        },
+      });
+      expect(conflicting.statusCode).toBe(409);
+      expect(conflicting.json().error.code).toBe('CONFLICT');
+
+      // No se creó un segundo movimiento ni se alteró el primero.
+      const movements = await prisma.inventoryMovement.findMany({
+        where: { organizationId, idempotencyKey: 'evento-externo-456' },
+      });
+      expect(movements).toHaveLength(1);
+      expect(movements[0]!.enteredQuantity.toString()).toBe('10');
+    });
+
+    it('idempotencia semántica: también detecta payload distinto en un ajuste (producto distinto, misma key)', async () => {
+      const first = await app.inject({
+        method: 'POST',
+        url: '/api/inventory/adjustments',
+        headers: adminAuthHeader,
+        payload: {
+          locationId: locationA,
+          productId: productLata,
+          enteredQuantity: '3',
+          reason: 'Ingreso no registrado',
+          idempotencyKey: 'evento-ajuste-789',
+        },
+      });
+      expect(first.statusCode).toBe(201);
+
+      const conflicting = await app.inject({
+        method: 'POST',
+        url: '/api/inventory/adjustments',
+        headers: adminAuthHeader,
+        payload: {
+          locationId: locationA,
+          productId: productCaja,
+          enteredQuantity: '3',
+          reason: 'Ingreso no registrado',
+          idempotencyKey: 'evento-ajuste-789',
+        },
+      });
+      expect(conflicting.statusCode).toBe(409);
+    });
+  });
+
+  describe('precisión decimal', () => {
+    it('acepta y conserva exactamente 0.1, sin pasar por float de JS', async () => {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/inventory/stock/initial',
+        headers: adminAuthHeader,
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '0.1' },
+      });
+      expect(response.statusCode).toBe(201);
+      expect(response.json().data.enteredQuantity).toBe('0.100');
+      expect(response.json().data.quantity).toBe('0.100');
+    });
+
+    it('0.1 + 0.2 (dos movimientos) da exactamente 0.300, no 0.30000000000000004', async () => {
+      await app.inject({
+        method: 'POST',
+        url: '/api/inventory/stock/initial',
+        headers: adminAuthHeader,
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '0.1' },
+      });
+      await app.inject({
+        method: 'POST',
+        url: '/api/inventory/adjustments',
+        headers: adminAuthHeader,
+        payload: {
+          locationId: locationA,
+          productId: productLata,
+          enteredQuantity: '0.2',
+          reason: 'Ajuste de prueba de precisión',
+        },
+      });
+
+      const stock = await app.inject({
+        method: 'GET',
+        url: `/api/inventory/stock?locationId=${locationA}&productId=${productLata}`,
+        headers: adminAuthHeader,
+      });
+      expect(stock.json().data[0].quantity).toBe('0.300');
+    });
+
+    it('conserva 3 posiciones decimales exactas (12.375) normalizadas por el factor de conversión', async () => {
+      // productCaja tiene unitsPerHandlingUnit = 12: 12.375 * 12 = 148.5 exacto.
+      const response = await app.inject({
+        method: 'POST',
+        url: '/api/inventory/adjustments',
+        headers: adminAuthHeader,
+        payload: {
+          locationId: locationA,
+          productId: productCaja,
+          enteredQuantity: '12.375',
+          reason: 'Ajuste con decimales',
+        },
+      });
+      expect(response.statusCode).toBe(201);
+      expect(response.json().data.enteredQuantity).toBe('12.375');
+      expect(response.json().data.quantity).toBe('148.500');
+    });
+
+    it('rechaza un formato decimal inválido (400), sin llegar a persistir nada', async () => {
+      const cases = ['abc', '1,5', '1.2345', '1.2.3', ''];
+      for (const enteredQuantity of cases) {
+        const response = await app.inject({
+          method: 'POST',
+          url: '/api/inventory/stock/initial',
+          headers: adminAuthHeader,
+          payload: { locationId: locationA, productId: productLata, enteredQuantity },
+        });
+        expect(response.statusCode).toBe(400);
+      }
+      const count = await prisma.inventoryMovement.count({ where: { organizationId } });
+      expect(count).toBe(0);
+    });
   });
 
   describe('ajustes', () => {
@@ -325,7 +471,12 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/adjustments',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 5, reason: '' },
+        payload: {
+          locationId: locationA,
+          productId: productLata,
+          enteredQuantity: '5',
+          reason: '',
+        },
       });
       expect(response.statusCode).toBe(400);
     });
@@ -338,7 +489,7 @@ describe('/api/inventory', () => {
         payload: {
           locationId: locationA,
           productId: productLata,
-          enteredQuantity: -5,
+          enteredQuantity: '-5',
           reason: 'Corrección por diferencia detectada',
         },
       });
@@ -360,7 +511,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 10 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
       });
       await app.inject({
         method: 'POST',
@@ -369,7 +520,7 @@ describe('/api/inventory', () => {
         payload: {
           locationId: locationA,
           productId: productLata,
-          enteredQuantity: 3,
+          enteredQuantity: '3',
           reason: 'Ingreso no registrado',
         },
       });
@@ -380,7 +531,7 @@ describe('/api/inventory', () => {
         payload: {
           locationId: locationA,
           productId: productLata,
-          enteredQuantity: -2,
+          enteredQuantity: '-2',
           reason: 'Merma no registrada',
         },
       });
@@ -398,13 +549,13 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 10 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
       });
       await app.inject({
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationB, productId: productLata, enteredQuantity: 4 },
+        payload: { locationId: locationB, productId: productLata, enteredQuantity: '4' },
       });
 
       const balances = await app.inject({
@@ -426,13 +577,13 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 10 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
       });
       await app.inject({
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productCaja, enteredQuantity: 1 },
+        payload: { locationId: locationA, productId: productCaja, enteredQuantity: '1' },
       });
 
       const balances = await app.inject({
@@ -521,7 +672,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 10 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
       });
       const movementId = created.json().data.id;
 
@@ -563,7 +714,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 10 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
       });
       await app.inject({
         method: 'POST',
@@ -576,7 +727,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 8 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '8' },
       });
       expect(secondAttempt.statusCode).toBe(201);
     });
@@ -586,7 +737,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 10 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
       });
       const movementId = created.json().data.id;
 
@@ -606,12 +757,75 @@ describe('/api/inventory', () => {
       expect(second.json().error.code).toBe('CONFLICT');
     });
 
+    it('dos reversiones CONCURRENTES del mismo movimiento: exactamente una gana (Etapa 3.1, Problema 1)', async () => {
+      // No es un test secuencial (revert(); revert();) -- ambos requests se
+      // disparan a la vez con Promise.all, contra la misma conexión/pool de
+      // Postgres real, para ejercitar de verdad el UPDATE condicional
+      // atómico + el índice único parcial de la migración
+      // 20260907130454_inventory_hardening.
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/inventory/stock/initial',
+        headers: adminAuthHeader,
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
+      });
+      const movementId = created.json().data.id;
+
+      const [responseA, responseB] = await Promise.all([
+        app.inject({
+          method: 'POST',
+          url: `/api/inventory/movements/${movementId}/reverse`,
+          headers: adminAuthHeader,
+          payload: { reason: 'Reversión concurrente A' },
+        }),
+        app.inject({
+          method: 'POST',
+          url: `/api/inventory/movements/${movementId}/reverse`,
+          headers: adminAuthHeader,
+          payload: { reason: 'Reversión concurrente B' },
+        }),
+      ]);
+
+      const statusCodes = [responseA.statusCode, responseB.statusCode].sort();
+      expect(statusCodes).toEqual([201, 409]);
+
+      const winner = responseA.statusCode === 201 ? responseA : responseB;
+      expect(winner.json().data.reversesMovementId).toBe(movementId);
+
+      // reversal count = 1 (invariante: 1 movimiento original -> máximo 1 reversión).
+      const reversals = await prisma.inventoryMovement.count({
+        where: { organizationId, reversesMovementId: movementId },
+      });
+      expect(reversals).toBe(1);
+
+      // El original quedó REVERSED, con su cantidad intacta (nunca se edita).
+      const originalRow = await prisma.inventoryMovement.findUniqueOrThrow({
+        where: { id: movementId },
+      });
+      expect(originalRow.status).toBe('REVERSED');
+      expect(originalRow.quantity.toString()).toBe('10');
+
+      // La auditoría también registra exactamente una reversión, no dos.
+      const auditRows = await prisma.auditLog.count({
+        where: { organizationId, action: 'INVENTORY_MOVEMENT_REVERSED' },
+      });
+      expect(auditRows).toBe(1);
+
+      // Saldo final correcto: +10 (original) + -10 (única reversión) = 0.
+      const stock = await app.inject({
+        method: 'GET',
+        url: `/api/inventory/stock?locationId=${locationA}&productId=${productLata}`,
+        headers: adminAuthHeader,
+      });
+      expect(stock.json().data[0].quantity).toBe('0.000');
+    });
+
     it('rechaza revertir sin motivo (400)', async () => {
       const created = await app.inject({
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 10 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
       });
       const response = await app.inject({
         method: 'POST',
@@ -627,7 +841,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 10 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
       });
       asEmployee();
       const response = await app.inject({
@@ -650,7 +864,7 @@ describe('/api/inventory', () => {
           payload: {
             locationId: locationA,
             productId: productLata,
-            enteredQuantity: 1,
+            enteredQuantity: '1',
             reason: `Ajuste ${i}`,
           },
         });
@@ -681,7 +895,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationB, productId: productLata, enteredQuantity: 1 },
+        payload: { locationId: locationB, productId: productLata, enteredQuantity: '1' },
       });
 
       const response = await app.inject({
@@ -732,7 +946,7 @@ describe('/api/inventory', () => {
         method: 'POST',
         url: '/api/inventory/stock/initial',
         headers: adminAuthHeader,
-        payload: { locationId: locationA, productId: productLata, enteredQuantity: 10 },
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
       });
       expect(response.statusCode).toBe(500);
 
@@ -744,6 +958,52 @@ describe('/api/inventory', () => {
       expect(auditRows).toHaveLength(0);
 
       app.audit.logTx = originalLogTx;
+    });
+
+    it('si falla la auditoría durante una reversión, ni el contramovimiento ni el status del original quedan aplicados', async () => {
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/inventory/stock/initial',
+        headers: adminAuthHeader,
+        payload: { locationId: locationA, productId: productLata, enteredQuantity: '10' },
+      });
+      const movementId = created.json().data.id;
+
+      const originalLogTx = app.audit.logTx;
+      app.audit.logTx = async () => {
+        throw new Error('Falla simulada al escribir la auditoría de la reversión');
+      };
+
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/inventory/movements/${movementId}/reverse`,
+        headers: adminAuthHeader,
+        payload: { reason: 'Reversión que debería abortar' },
+      });
+      expect(response.statusCode).toBe(500);
+
+      app.audit.logTx = originalLogTx;
+
+      // El original sigue ACTIVE (el UPDATE condicional se revirtió con la transacción).
+      const originalRow = await prisma.inventoryMovement.findUniqueOrThrow({
+        where: { id: movementId },
+      });
+      expect(originalRow.status).toBe('ACTIVE');
+
+      // No quedó ningún contramovimiento a medio crear.
+      const reversals = await prisma.inventoryMovement.count({
+        where: { organizationId, reversesMovementId: movementId },
+      });
+      expect(reversals).toBe(0);
+
+      // Y ahora sí se puede revertir normalmente -- no quedó en un estado inconsistente.
+      const retry = await app.inject({
+        method: 'POST',
+        url: `/api/inventory/movements/${movementId}/reverse`,
+        headers: adminAuthHeader,
+        payload: { reason: 'Reintento después de la falla simulada' },
+      });
+      expect(retry.statusCode).toBe(201);
     });
   });
 });

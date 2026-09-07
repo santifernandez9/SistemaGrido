@@ -1,23 +1,24 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useAuth, ApiClientError } from '@sistema-grido/auth-client';
-import type {
-  CreateAdjustmentInput,
-  CreateInitialStockInput,
-  LocationSummary,
-  Product,
-  StockBalance,
+import {
+  DECIMAL_QUANTITY_PATTERN,
+  type CreateAdjustmentInput,
+  type CreateInitialStockInput,
+  type LocationSummary,
+  type Product,
+  type StockBalance,
 } from '@sistema-grido/shared-types';
 
 const EMPTY_INITIAL: CreateInitialStockInput = {
   locationId: '',
   productId: '',
-  enteredQuantity: 1,
+  enteredQuantity: '1',
 };
 
 const EMPTY_ADJUSTMENT: CreateAdjustmentInput = {
   locationId: '',
   productId: '',
-  enteredQuantity: 1,
+  enteredQuantity: '1',
   reason: '',
 };
 
@@ -27,6 +28,15 @@ const EMPTY_ADJUSTMENT: CreateAdjustmentInput = {
  * docs/ETAPA-3-MOTOR-INVENTARIO.md). Un saldo negativo se muestra, no se
  * oculta ni se corrige solo -- es una señal a investigar (decisión
  * confirmada explícitamente para esta etapa).
+ *
+ * Etapa 3.1, corrección del Problema 2: las cantidades ingresadas viajan
+ * como STRING decimal (`CreateInitialStockInput.enteredQuantity`,
+ * `CreateAdjustmentInput.enteredQuantity`), nunca como `number` de JS. Por
+ * eso los campos de cantidad son `<input type="text" inputMode="decimal">`
+ * con el valor guardado tal cual lo tipeó la persona -- nunca
+ * `valueAsNumber` ni `Number(...)` en ningún punto de este archivo. El
+ * formato se valida contra `DECIMAL_QUANTITY_PATTERN` (mismo patrón que usa
+ * el backend) antes de enviar, mostrando un error comprensible si no matchea.
  */
 export function InventoryStockPage() {
   const { api } = useAuth();
@@ -49,7 +59,7 @@ export function InventoryStockPage() {
   const [adjustmentError, setAdjustmentError] = useState<string | null>(null);
   const [adjustmentOk, setAdjustmentOk] = useState<string | null>(null);
 
-  async function loadMasters() {
+  const loadMasters = useCallback(async () => {
     const [locationsData, productsData] = await Promise.all([
       api.get<LocationSummary[]>('/api/locations'),
       api.get<Product[]>('/api/products'),
@@ -66,9 +76,9 @@ export function InventoryStockPage() {
       locationId: s.locationId || (locationsData[0]?.id ?? ''),
       productId: s.productId || (productsData[0]?.id ?? ''),
     }));
-  }
+  }, [api]);
 
-  async function loadBalances() {
+  const loadBalances = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -82,25 +92,34 @@ export function InventoryStockPage() {
     } finally {
       setLoading(false);
     }
-  }
+  }, [api, locationFilter, productFilter]);
 
+  // Sin eslint-disable: `loadMasters`/`loadBalances` son estables mientras
+  // sus propias dependencias (api, locationFilter, productFilter) no
+  // cambien -- useCallback hace que el efecto se re-ejecute exactamente
+  // cuando corresponde, sin necesitar la excepción del linter (Etapa 3.1,
+  // corrección del Problema 4).
   useEffect(() => {
     void loadMasters();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [loadMasters]);
 
   useEffect(() => {
     void loadBalances();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locationFilter, productFilter]);
+  }, [loadBalances]);
 
   const productById = useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
 
   async function handleInitialSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setInitialSubmitting(true);
     setInitialError(null);
     setInitialOk(null);
+    if (!DECIMAL_QUANTITY_PATTERN.test(initialForm.enteredQuantity)) {
+      setInitialError(
+        'Cantidad inválida: escribí un número decimal con hasta 3 decimales, ej. "12.375".',
+      );
+      return;
+    }
+    setInitialSubmitting(true);
     try {
       await api.post('/api/inventory/stock/initial', initialForm);
       setInitialOk('Stock inicial cargado.');
@@ -116,13 +135,19 @@ export function InventoryStockPage() {
 
   async function handleAdjustmentSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setAdjustmentSubmitting(true);
     setAdjustmentError(null);
     setAdjustmentOk(null);
+    if (!DECIMAL_QUANTITY_PATTERN.test(adjustmentForm.enteredQuantity)) {
+      setAdjustmentError(
+        'Cantidad inválida: escribí un número decimal (opcionalmente negativo) con hasta 3 decimales, ej. "-5.5".',
+      );
+      return;
+    }
+    setAdjustmentSubmitting(true);
     try {
       await api.post('/api/inventory/adjustments', adjustmentForm);
       setAdjustmentOk('Ajuste registrado.');
-      setAdjustmentForm((s) => ({ ...s, enteredQuantity: 1, reason: '' }));
+      setAdjustmentForm((s) => ({ ...s, enteredQuantity: '1', reason: '' }));
       await loadBalances();
     } catch (err) {
       setAdjustmentError(
@@ -179,17 +204,18 @@ export function InventoryStockPage() {
 
           <label htmlFor="init-quantity">
             Cantidad (
-            {productById.get(initialForm.productId)?.unitOfMeasureName ?? 'unidad de manejo'})
+            {productById.get(initialForm.productId)?.unitOfMeasureName ?? 'unidad de manejo'}) --
+            hasta 3 decimales
           </label>
           <input
             id="init-quantity"
-            type="number"
-            min={0.001}
-            step="any"
+            type="text"
+            inputMode="decimal"
+            placeholder="Ej: 12.375"
             required
             value={initialForm.enteredQuantity}
             onChange={(event) =>
-              setInitialForm((s) => ({ ...s, enteredQuantity: event.target.valueAsNumber }))
+              setInitialForm((s) => ({ ...s, enteredQuantity: event.target.value }))
             }
           />
 
@@ -249,16 +275,18 @@ export function InventoryStockPage() {
 
           <label htmlFor="adj-quantity">
             Cantidad (con signo; negativa resta) (
-            {productById.get(adjustmentForm.productId)?.unitOfMeasureName ?? 'unidad de manejo'})
+            {productById.get(adjustmentForm.productId)?.unitOfMeasureName ?? 'unidad de manejo'}) --
+            hasta 3 decimales
           </label>
           <input
             id="adj-quantity"
-            type="number"
-            step="any"
+            type="text"
+            inputMode="decimal"
+            placeholder="Ej: -5.5"
             required
             value={adjustmentForm.enteredQuantity}
             onChange={(event) =>
-              setAdjustmentForm((s) => ({ ...s, enteredQuantity: event.target.valueAsNumber }))
+              setAdjustmentForm((s) => ({ ...s, enteredQuantity: event.target.value }))
             }
           />
 
@@ -368,7 +396,11 @@ export function InventoryStockPage() {
 }
 
 /** Recorta ceros finales del NUMERIC(14,3) que devuelve la API sólo para mostrarlo
- * más legible -- el valor exacto sigue viajando sin redondear en `quantity`. */
+ * más legible -- el valor exacto sigue viajando sin redondear en `quantity`. Esto
+ * es sólo DISPLAY (una conversión a `number` de un valor ya persistido, para
+ * formatear con separadores de miles); nunca se usa para calcular ni para
+ * volver a enviar una cantidad al backend -- ver el comentario de Problema 2
+ * arriba. */
 function formatQuantity(quantity: string): string {
   const n = Number(quantity);
   return Number.isFinite(n) ? n.toLocaleString('es-AR', { maximumFractionDigits: 3 }) : quantity;

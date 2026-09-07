@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Prisma } from '@sistema-grido/db';
 
@@ -32,6 +33,20 @@ function isCheckViolation(err: unknown): boolean {
 }
 function isUniqueViolation(err: unknown): boolean {
   return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
+}
+/**
+ * Etapa 3.1, Problema "Protección del ledger": el trigger
+ * `trg_inventory_movement_prevent_mutation` rechaza con un `RAISE
+ * EXCEPTION` (mismo mecanismo que un CHECK, `PrismaClientUnknownRequestError`
+ * sin código propio) cualquier UPDATE que no sea exactamente
+ * `status: ACTIVE -> REVERSED`.
+ */
+function isImmutabilityTriggerRejection(err: unknown): boolean {
+  return (
+    err instanceof Prisma.PrismaClientUnknownRequestError &&
+    (err.message.includes('inventory_movement es inmutable') ||
+      err.message.includes('Transición de status no permitida'))
+  );
 }
 
 interface OrgFixture {
@@ -209,11 +224,19 @@ describe('Integridad del ledger de inventario a nivel de base de datos (Etapa 3)
   });
 
   it('rechaza un movimiento que se revierte a sí mismo (CHECK reverses_not_self)', async () => {
-    const created = await prisma.inventoryMovement.create({ data: validMovementData(orgA) });
+    // Se prueba vía INSERT (un id auto-generado por el cliente, usado a la
+    // vez como `id` y como `reversesMovementId`) y no vía UPDATE: desde
+    // Etapa 3.1, el trigger de inmutabilidad (ver
+    // "protección del ledger" en docs/ETAPA-3.1-HARDENING-INVENTARIO.md)
+    // bloquea CUALQUIER cambio a `reversesMovementId` sobre una fila ya
+    // creada, así que ese camino ya no llega nunca al CHECK -- pero el
+    // CHECK sigue siendo la garantía real contra el único camino por el que
+    // un self-reference puede colarse: un INSERT donde el llamador fija su
+    // propio `id`.
+    const selfId = randomUUID();
     await expect(
-      prisma.inventoryMovement.update({
-        where: { id: created.id },
-        data: { reversesMovementId: created.id },
+      prisma.inventoryMovement.create({
+        data: { ...validMovementData(orgA), id: selfId, reversesMovementId: selfId },
       }),
     ).rejects.toSatisfy(isCheckViolation);
   });
@@ -267,5 +290,121 @@ describe('Integridad del ledger de inventario a nivel de base de datos (Etapa 3)
       data: validMovementData(orgB, { idempotencyKey: 'evento-compartido' }),
     });
     expect(createdInB.idempotencyKey).toBe('evento-compartido');
+  });
+
+  describe('Etapa 3.1 — Problema 1 (reversión concurrente): índice único parcial', () => {
+    it('rechaza una segunda reversión que apunte al mismo movimiento original (mismo reversesMovementId)', async () => {
+      const original = await prisma.inventoryMovement.create({ data: validMovementData(orgA) });
+
+      await prisma.inventoryMovement.create({
+        data: validMovementData(orgA, {
+          quantity: -10,
+          enteredQuantity: -10,
+          reversesMovementId: original.id,
+          reason: 'Primera reversión',
+        }),
+      });
+
+      // Directo por Prisma, bypaseando el servicio (que ya bloquea esto con
+      // el UPDATE condicional): confirma que la garantía de PostgreSQL
+      // -- el índice único parcial de la migración
+      // 20260907130454_inventory_hardening -- existe independientemente de
+      // la lógica de aplicación.
+      await expect(
+        prisma.inventoryMovement.create({
+          data: validMovementData(orgA, {
+            quantity: -10,
+            enteredQuantity: -10,
+            reversesMovementId: original.id,
+            reason: 'Segunda reversión (debe rechazarse)',
+          }),
+        }),
+      ).rejects.toSatisfy(isUniqueViolation);
+
+      const reversalCount = await prisma.inventoryMovement.count({
+        where: { organizationId: orgA.organizationId, reversesMovementId: original.id },
+      });
+      expect(reversalCount).toBe(1);
+    });
+
+    it('permite que dos movimientos DISTINTOS tengan cada uno su propia reversión', async () => {
+      const originalOne = await prisma.inventoryMovement.create({ data: validMovementData(orgA) });
+      // movementType distinto (ADJUSTMENT) para no chocar con el índice único
+      // de INITIAL_STOCK único activo (Etapa 3) sobre el mismo producto/ubicación.
+      const originalTwo = await prisma.inventoryMovement.create({
+        data: validMovementData(orgA, { movementType: 'ADJUSTMENT', reason: 'Ajuste original' }),
+      });
+
+      await prisma.inventoryMovement.create({
+        data: validMovementData(orgA, {
+          quantity: -10,
+          enteredQuantity: -10,
+          reversesMovementId: originalOne.id,
+          reason: 'Reversión de uno',
+        }),
+      });
+      const reversalTwo = await prisma.inventoryMovement.create({
+        data: validMovementData(orgA, {
+          quantity: -10,
+          enteredQuantity: -10,
+          reversesMovementId: originalTwo.id,
+          reason: 'Reversión del otro',
+        }),
+      });
+      expect(reversalTwo.reversesMovementId).toBe(originalTwo.id);
+    });
+  });
+
+  describe('Etapa 3.1 — protección del ledger contra UPDATE destructivo', () => {
+    it('rechaza un UPDATE que cambie quantity directamente por Prisma', async () => {
+      const created = await prisma.inventoryMovement.create({ data: validMovementData(orgA) });
+      await expect(
+        prisma.inventoryMovement.update({
+          where: { id: created.id },
+          data: { quantity: 999 },
+        }),
+      ).rejects.toSatisfy(isImmutabilityTriggerRejection);
+
+      const reloaded = await prisma.inventoryMovement.findUniqueOrThrow({
+        where: { id: created.id },
+      });
+      expect(reloaded.quantity.toString()).toBe('10');
+    });
+
+    it('rechaza un UPDATE que cambie el motivo, el producto o cualquier otra columna que no sea status', async () => {
+      const created = await prisma.inventoryMovement.create({
+        data: validMovementData(orgA, { movementType: 'ADJUSTMENT', reason: 'Motivo original' }),
+      });
+      await expect(
+        prisma.inventoryMovement.update({
+          where: { id: created.id },
+          data: { reason: 'Motivo alterado' },
+        }),
+      ).rejects.toSatisfy(isImmutabilityTriggerRejection);
+    });
+
+    it('rechaza una transición de status hacia atrás (REVERSED -> ACTIVE)', async () => {
+      const created = await prisma.inventoryMovement.create({ data: validMovementData(orgA) });
+      await prisma.inventoryMovement.update({
+        where: { id: created.id },
+        data: { status: 'REVERSED' },
+      });
+      await expect(
+        prisma.inventoryMovement.update({
+          where: { id: created.id },
+          data: { status: 'ACTIVE' },
+        }),
+      ).rejects.toSatisfy(isImmutabilityTriggerRejection);
+    });
+
+    it('permite la única transición legítima: status ACTIVE -> REVERSED, sin tocar nada más', async () => {
+      const created = await prisma.inventoryMovement.create({ data: validMovementData(orgA) });
+      const updated = await prisma.inventoryMovement.update({
+        where: { id: created.id },
+        data: { status: 'REVERSED' },
+      });
+      expect(updated.status).toBe('REVERSED');
+      expect(updated.quantity.toString()).toBe(created.quantity.toString());
+    });
   });
 });

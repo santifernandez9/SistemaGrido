@@ -35,6 +35,21 @@ export const IMPLEMENTED_MOVEMENT_TYPES = ['INITIAL_STOCK', 'ADJUSTMENT'] as con
 export const MOVEMENT_STATUSES = ['ACTIVE', 'REVERSED'] as const;
 export type MovementStatus = (typeof MOVEMENT_STATUSES)[number];
 
+/**
+ * Formato de cantidad decimal aceptado por la API (Etapa 3.1, corrección del
+ * Problema 2: "no utilizar float de JavaScript como representación
+ * intermedia de cantidades que requieran precisión"). Un signo opcional,
+ * parte entera obligatoria, hasta 3 decimales -- misma escala que
+ * `NUMERIC(14,3)` en PostgreSQL (packages/db/prisma/schema.prisma,
+ * `InventoryMovement.quantity`). Se valida como STRING en el schema Zod del
+ * backend y se convierte directamente a `Prisma.Decimal` desde ese string
+ * (`new Prisma.Decimal(input.enteredQuantity)`), nunca vía `Number(...)` --
+ * ver `apps/api/src/services/inventory-ledger.ts`. El frontend usa el mismo
+ * patrón para validar el campo de texto antes de enviarlo (nunca
+ * `valueAsNumber`) -- ver `apps/admin-web/src/pages/InventoryStockPage.tsx`.
+ */
+export const DECIMAL_QUANTITY_PATTERN = /^-?\d{1,11}(\.\d{1,3})?$/;
+
 export const INVENTORY_AUDIT_MODULES = ['INVENTORY'] as const;
 export type InventoryAuditModule = (typeof INVENTORY_AUDIT_MODULES)[number];
 
@@ -112,9 +127,24 @@ export interface StockBalance {
 export interface CreateInitialStockInput {
   locationId: string;
   productId: string;
-  enteredQuantity: number;
+  /**
+   * String decimal (Etapa 3.1, Problema 2) -- ej. `"12.375"`, nunca un
+   * `number` de JS. Debe cumplir `DECIMAL_QUANTITY_PATTERN`. El signo se
+   * ignora para stock inicial (siempre debe ser positivo; un signo negativo
+   * o cero se rechaza a nivel de servicio).
+   */
+  enteredQuantity: string;
   /** Fecha efectiva del conteo/carga, si es distinta de "ahora". */
   occurredAt?: string;
+  /**
+   * Clave de idempotencia opcional (sección 14 del prompt de Etapa 3).
+   * Reenviar la misma clave con el mismo payload (misma identidad
+   * semántica: locationId/productId/enteredQuantity/occurredAt) devuelve el
+   * movimiento ya creado; reenviarla con un payload distinto devuelve
+   * `409 CONFLICT` -- nunca se reutiliza silenciosamente (Etapa 3.1,
+   * Problema 3). Ver `apps/api/src/services/inventory-ledger.ts`,
+   * `computeIdempotencyFingerprint`.
+   */
   idempotencyKey?: string;
 }
 
@@ -129,10 +159,14 @@ export interface CreateInitialStockInput {
 export interface CreateAdjustmentInput {
   locationId: string;
   productId: string;
-  /** Con signo: positivo = ajuste que suma stock, negativo = ajuste que resta. */
-  enteredQuantity: number;
+  /**
+   * String decimal con signo (Etapa 3.1, Problema 2) -- ej. `"-5.000"`;
+   * positivo suma, negativo resta. Debe cumplir `DECIMAL_QUANTITY_PATTERN`.
+   */
+  enteredQuantity: string;
   reason: string;
   occurredAt?: string;
+  /** Ver `CreateInitialStockInput.idempotencyKey`. */
   idempotencyKey?: string;
 }
 

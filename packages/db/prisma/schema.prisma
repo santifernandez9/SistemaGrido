@@ -496,6 +496,17 @@ model InventoryMovement {
   /// mecanismo -- único por organización cuando está presente -- ya existe.
   idempotencyKey String? @map("idempotency_key")
 
+  /// Huella de la identidad semántica del payload que generó este movimiento
+  /// (Etapa 3.1, corrección del Problema 3: "la idempotencia debe distinguir
+  /// un retry legítimo de una reutilización con contenido incompatible").
+  /// Sólo tiene sentido junto a `idempotencyKey` -- se guarda un string JSON
+  /// canónico de los campos que definen la operación (tipo, ubicación,
+  /// producto, cantidad ingresada, motivo, fecha efectiva EXPLÍCITA si se
+  /// mandó una -- nunca el timestamp interno generado por el servidor). Ver
+  /// `apps/api/src/services/inventory-ledger.ts`,
+  /// `computeIdempotencyFingerprint`.
+  idempotencyFingerprint String? @map("idempotency_fingerprint")
+
   /// Movimiento original que este movimiento revierte (sección 13 del
   /// prompt: "una reversión debe preservar movimiento original, crear
   /// movimiento compensatorio, vincular ambos"). FK compuesta
@@ -536,6 +547,19 @@ model InventoryMovement {
   /// PostgreSQL en UNIQUE), así que las altas manuales sin clave conviven
   /// sin problema.
   @@unique([organizationId, idempotencyKey])
+  // Etapa 3.1, corrección del Problema 1 (reversión concurrente): a lo sumo
+  // una fila puede tener un `reversesMovementId` dado, por organización --
+  // garantiza a nivel de PostgreSQL que un movimiento nunca tenga más de una
+  // reversión, incluso si dos requests concurrentes lograran pasar la
+  // verificación de la capa de aplicación. Índice único PARCIAL (no
+  // expresable declarativamente en schema.prisma -- agregado a mano en la
+  // migración, mismo patrón que el índice de INITIAL_STOCK de Etapa 3):
+  //   CREATE UNIQUE INDEX ... ON inventory_movement(organization_id,
+  //   reverses_movement_id) WHERE reverses_movement_id IS NOT NULL;
+  // Es la segunda capa de la corrección -- la primera es el
+  // `UPDATE ... WHERE status = 'ACTIVE'` atómico de `reverseMovement` (ver
+  // apps/api/src/services/inventory-ledger.ts). No se representa acá como
+  // @@unique porque Prisma no soporta índices parciales declarativos.
   /// Consulta principal de stock teórico y de historial (sección 9/22 del
   /// prompt): agregación/filtro por ubicación+producto, ordenado por fecha.
   @@index([organizationId, locationId, productId, occurredAt])

@@ -5,6 +5,7 @@ import type {
   CreateInitialStockInput,
   InventoryMovement,
   MovementFilters,
+  MovementType,
   Page,
   PageInput,
   StockBalance,
@@ -15,10 +16,12 @@ import { ConflictError, NotFoundError, ValidationError } from '../errors.js';
 /**
  * Ledger central de movimientos de inventario (RF-009, RN-007..RN-010,
  * CONFIRMADO). Única puerta de escritura de stock del sistema -- ver
- * docs/ETAPA-3-MOTOR-INVENTARIO.md. Ninguna otra función de este backend
- * debe usar `fastify.db.inventoryMovement.create` directamente; todo alta
- * de movimiento pasa por acá para garantizar la transacción movimiento+auditoría
- * (sección 18 del prompt de Etapa 3) y las validaciones de dominio.
+ * docs/ETAPA-3-MOTOR-INVENTARIO.md y docs/ETAPA-3.1-HARDENING-INVENTARIO.md.
+ * Ninguna otra función de este backend debe usar
+ * `fastify.db.inventoryMovement.create` directamente; todo alta de
+ * movimiento pasa por acá para garantizar la transacción
+ * movimiento+auditoría (sección 18 del prompt de Etapa 3) y las
+ * validaciones de dominio.
  */
 
 function isUniqueConstraintError(err: unknown): boolean {
@@ -100,17 +103,67 @@ async function assertProductForMovement(
   return product;
 }
 
-async function findByIdempotencyKey(
+/**
+ * Etapa 3.1, corrección del Problema 3 ("idempotencia semántica"). La
+ * identidad de una operación de alta de movimiento es exactamente estos
+ * campos -- deliberadamente NO incluye nada generado internamente por el
+ * servidor (id, createdAt, el `occurredAt` resuelto por default, etc.): dos
+ * requests con el mismo `idempotencyKey` y estos mismos valores son "el
+ * mismo evento" reenviado (retry legítimo); si alguno difiere, es una
+ * reutilización de clave con una operación distinta (conflicto).
+ *
+ * `enteredQuantity` se canonicaliza vía `Prisma.Decimal` antes de
+ * stringificar (`"5"` y `"5.00"` deben considerarse la misma cantidad).
+ * `occurredAt` sólo cuenta si el llamador lo mandó explícitamente -- el
+ * valor por default ("ahora") no es parte de lo que el cliente pidió, así
+ * que nunca debe hacer que un retry legítimo sin `occurredAt` explícito
+ * parezca un conflicto.
+ */
+function computeIdempotencyFingerprint(payload: {
+  movementType: MovementType;
+  locationId: string;
+  productId: string;
+  enteredQuantity: Prisma.Decimal;
+  reason?: string | null;
+  occurredAt?: string | null;
+}): string {
+  return JSON.stringify({
+    movementType: payload.movementType,
+    locationId: payload.locationId,
+    productId: payload.productId,
+    enteredQuantity: payload.enteredQuantity.toString(),
+    reason: payload.reason ?? null,
+    occurredAt: payload.occurredAt ?? null,
+  });
+}
+
+/**
+ * Resuelve qué hacer con un `idempotencyKey` opcional antes de dar de alta
+ * un movimiento: si no se mandó, no hay nada que resolver (`null`). Si se
+ * mandó y ya existe un movimiento con esa clave en la organización, compara
+ * su huella semántica (sección de arriba): coincide -> retry legítimo, se
+ * devuelve el movimiento ya creado sin tocar nada; no coincide -> conflicto
+ * explícito, `409`, la clave no se reutiliza silenciosamente para una
+ * operación distinta.
+ */
+async function resolveIdempotency(
   fastify: FastifyInstance,
   organizationId: string,
   idempotencyKey: string | undefined,
+  fingerprint: string,
 ): Promise<InventoryMovement | null> {
   if (!idempotencyKey) return null;
   const existing = await fastify.db.inventoryMovement.findFirst({
     where: { organizationId, idempotencyKey },
     include: movementInclude,
   });
-  return existing ? mapMovement(existing) : null;
+  if (!existing) return null;
+  if (existing.idempotencyFingerprint === fingerprint) {
+    return mapMovement(existing);
+  }
+  throw new ConflictError(
+    'Esta clave de idempotencia ya se usó con datos distintos (ubicación, producto, cantidad, motivo o fecha efectiva); no puede reutilizarse para una operación diferente.',
+  );
 }
 
 /**
@@ -248,11 +301,29 @@ export async function createInitialStock(
   actor: CurrentUser,
   input: CreateInitialStockInput,
 ): Promise<InventoryMovement> {
-  if (!(input.enteredQuantity > 0)) {
+  // Etapa 3.1, corrección del Problema 2: `input.enteredQuantity` es un
+  // string decimal (ya validado por formato/escala en el schema Zod de la
+  // ruta, ver apps/api/src/routes/inventory.ts). Se convierte DIRECTAMENTE
+  // a Prisma.Decimal acá -- nunca pasa por `Number(...)` ni por
+  // `valueAsNumber` en ningún punto del camino.
+  const enteredQuantity = new Prisma.Decimal(input.enteredQuantity);
+  if (enteredQuantity.lte(0)) {
     throw new ValidationError('La cantidad de stock inicial debe ser mayor a cero');
   }
 
-  const idempotent = await findByIdempotencyKey(fastify, organizationId, input.idempotencyKey);
+  const fingerprint = computeIdempotencyFingerprint({
+    movementType: 'INITIAL_STOCK',
+    locationId: input.locationId,
+    productId: input.productId,
+    enteredQuantity,
+    occurredAt: input.occurredAt ?? null,
+  });
+  const idempotent = await resolveIdempotency(
+    fastify,
+    organizationId,
+    input.idempotencyKey,
+    fingerprint,
+  );
   if (idempotent) return idempotent;
 
   await assertLocationForMovement(fastify, organizationId, input.locationId);
@@ -282,7 +353,6 @@ export async function createInitialStock(
   }
 
   const conversionFactor = product.unitsPerHandlingUnit;
-  const enteredQuantity = new Prisma.Decimal(input.enteredQuantity);
   const quantity = enteredQuantity.mul(conversionFactor);
 
   try {
@@ -299,6 +369,7 @@ export async function createInitialStock(
           conversionFactor,
           occurredAt: input.occurredAt ? new Date(input.occurredAt) : undefined,
           idempotencyKey: input.idempotencyKey ?? null,
+          idempotencyFingerprint: input.idempotencyKey ? fingerprint : null,
           createdById: actor.id,
         },
         include: movementInclude,
@@ -342,18 +413,32 @@ export async function createAdjustment(
   if (!reason) {
     throw new ValidationError('El ajuste requiere un motivo');
   }
-  if (input.enteredQuantity === 0) {
+  // Etapa 3.1, Problema 2: conversión directa string -> Decimal, sin Number().
+  const enteredQuantity = new Prisma.Decimal(input.enteredQuantity);
+  if (enteredQuantity.isZero()) {
     throw new ValidationError('La cantidad del ajuste no puede ser cero');
   }
 
-  const idempotent = await findByIdempotencyKey(fastify, organizationId, input.idempotencyKey);
+  const fingerprint = computeIdempotencyFingerprint({
+    movementType: 'ADJUSTMENT',
+    locationId: input.locationId,
+    productId: input.productId,
+    enteredQuantity,
+    reason,
+    occurredAt: input.occurredAt ?? null,
+  });
+  const idempotent = await resolveIdempotency(
+    fastify,
+    organizationId,
+    input.idempotencyKey,
+    fingerprint,
+  );
   if (idempotent) return idempotent;
 
   await assertLocationForMovement(fastify, organizationId, input.locationId);
   const product = await assertProductForMovement(fastify, organizationId, input.productId);
 
   const conversionFactor = product.unitsPerHandlingUnit;
-  const enteredQuantity = new Prisma.Decimal(input.enteredQuantity);
   const quantity = enteredQuantity.mul(conversionFactor);
 
   return fastify.db.$transaction(async (tx) => {
@@ -370,6 +455,7 @@ export async function createAdjustment(
         reason,
         occurredAt: input.occurredAt ? new Date(input.occurredAt) : undefined,
         idempotencyKey: input.idempotencyKey ?? null,
+        idempotencyFingerprint: input.idempotencyKey ? fingerprint : null,
         createdById: actor.id,
       },
       include: movementInclude,
@@ -398,11 +484,20 @@ export async function createAdjustment(
  * allá de su `status` (ACTIVE -> REVERSED) -- `quantity`, `reason` y el
  * resto de sus campos quedan intactos para siempre (RN-008/RN-009).
  *
- * El `status` del original se actualiza ANTES de insertar la reversión (no
- * al revés): el índice único parcial de INITIAL_STOCK activo evalúa cada
- * INSERT/UPDATE de forma inmediata (no diferida), así que si se insertara la
- * reversión primero, con el original todavía en ACTIVE, ambos movimientos
- * INITIAL_STOCK+ACTIVE coexistirían un instante y violarían el índice.
+ * Etapa 3.1, corrección del Problema 1 ("doble reversión concurrente"): la
+ * protección real es el `UPDATE ... WHERE status = 'ACTIVE'` de abajo,
+ * ejecutado dentro de una transacción -- NO el chequeo de `original.status`
+ * de más arriba (ese sigue existiendo sólo como atajo rápido para el caso
+ * secuencial obvio, evita abrir una transacción para un pedido que ya se
+ * sabe inválido). Dos requests concurrentes que pasen ese chequeo inicial
+ * (ambos vieron `ACTIVE` porque llegaron casi al mismo tiempo) igual no
+ * pueden generar dos reversiones: Postgres serializa el acceso a la MISMA
+ * fila en el `UPDATE` condicional -- la segunda transacción espera a que la
+ * primera confirme y, al reintentar, ya no encuentra la fila en `ACTIVE`
+ * (0 filas afectadas), así que aborta antes de insertar nada. El índice
+ * único parcial `(organization_id, reverses_movement_id)` de la migración
+ * es la segunda capa: protege el invariante aunque algún camino de código
+ * futuro no pase por este `UPDATE` condicional.
  */
 export async function reverseMovement(
   fastify: FastifyInstance,
@@ -423,46 +518,61 @@ export async function reverseMovement(
   if (!original) {
     throw new NotFoundError('Movimiento no encontrado en esta organización');
   }
+  // Atajo rápido, no la protección real -- ver el UPDATE condicional de abajo.
   if (original.status !== 'ACTIVE') {
     throw new ConflictError('Este movimiento ya fue revertido; no se puede revertir dos veces');
   }
 
-  return fastify.db.$transaction(async (tx) => {
-    await tx.inventoryMovement.update({
-      where: { id: original.id },
-      data: { status: 'REVERSED' },
-    });
+  try {
+    return await fastify.db.$transaction(async (tx) => {
+      const updateResult = await tx.inventoryMovement.updateMany({
+        where: { id: original.id, organizationId, status: 'ACTIVE' },
+        data: { status: 'REVERSED' },
+      });
+      if (updateResult.count === 0) {
+        // Otra transacción ganó la carrera entre que leímos el original (arriba)
+        // y que llegamos acá: aborta sin crear ni auditar nada.
+        throw new ConflictError('Este movimiento ya fue revertido; no se puede revertir dos veces');
+      }
 
-    const reversal = await tx.inventoryMovement.create({
-      data: {
+      const reversal = await tx.inventoryMovement.create({
+        data: {
+          organizationId,
+          locationId: original.locationId,
+          productId: original.productId,
+          movementType: original.movementType,
+          quantity: original.quantity.negated(),
+          enteredQuantity: original.enteredQuantity.negated(),
+          entryUnitOfMeasureId: original.entryUnitOfMeasureId,
+          conversionFactor: original.conversionFactor,
+          reason,
+          reversesMovementId: original.id,
+          createdById: actor.id,
+        },
+        include: movementInclude,
+      });
+
+      await fastify.audit.logTx(tx, {
         organizationId,
-        locationId: original.locationId,
-        productId: original.productId,
-        movementType: original.movementType,
-        quantity: original.quantity.negated(),
-        enteredQuantity: original.enteredQuantity.negated(),
-        entryUnitOfMeasureId: original.entryUnitOfMeasureId,
-        conversionFactor: original.conversionFactor,
+        userId: actor.id,
+        roleCode: actor.roleCode,
+        action: 'INVENTORY_MOVEMENT_REVERSED',
+        module: 'INVENTORY',
+        entityType: 'inventory_movement',
+        entityId: reversal.id,
+        beforeValue: mapMovement(original),
+        afterValue: mapMovement(reversal),
         reason,
-        reversesMovementId: original.id,
-        createdById: actor.id,
-      },
-      include: movementInclude,
-    });
+      });
 
-    await fastify.audit.logTx(tx, {
-      organizationId,
-      userId: actor.id,
-      roleCode: actor.roleCode,
-      action: 'INVENTORY_MOVEMENT_REVERSED',
-      module: 'INVENTORY',
-      entityType: 'inventory_movement',
-      entityId: reversal.id,
-      beforeValue: mapMovement(original),
-      afterValue: mapMovement(reversal),
-      reason,
+      return mapMovement(reversal);
     });
-
-    return mapMovement(reversal);
-  });
+  } catch (err) {
+    if (isUniqueConstraintError(err)) {
+      // Índice único parcial (organization_id, reverses_movement_id) --
+      // segunda capa de defensa, ver migración 20260907130454_inventory_hardening.
+      throw new ConflictError('Este movimiento ya fue revertido; no se puede revertir dos veces');
+    }
+    throw err;
+  }
 }
