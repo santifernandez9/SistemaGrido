@@ -3,7 +3,7 @@ services:
     name: sistema-grido-api
     runtime: node
     region: oregon
-    plan: starter
+    plan: free
     rootDir: .
     # Compila packages/shared-types y genera el cliente de Prisma. Deliberadamente
     # NO corre migraciones acá (docs/ETAPA-2-CATALOGO-MAESTROS.md, sección
