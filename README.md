@@ -5,17 +5,18 @@ Sistema de control de stock, caja y rentabilidad para Heladerías Grido
 administración y app operativa PWA para heladería/depósito) y paquetes
 compartidos.
 
-> Este repositorio está en **Etapa 2.1 — Integridad multi-organización en
-> catálogo**: además de la base técnica (auth, usuarios, roles, auditoría) y
-> el módulo de catálogo (Productos, Categorías, Sabores) con datos reales del
-> cliente importados, las relaciones del catálogo entre sí quedan protegidas
-> también a nivel de PostgreSQL (no sólo en el backend) contra mezclas entre
-> organizaciones. Todavía no implementa el motor de inventario (stock, ventas,
-> caja, mermas, etc.) — ver
-> [`docs/ETAPA-2-CATALOGO-MAESTROS.md`](docs/ETAPA-2-CATALOGO-MAESTROS.md) y
-> [`docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md`](docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md)
-> para el detalle completo de qué se construyó y qué queda explícitamente
-> pendiente.
+> Este repositorio está en **Etapa 3 — Motor de Inventario / Ledger de
+> Stock**: además de la base técnica (auth, usuarios, roles, auditoría) y el
+> catálogo (Productos, Categorías, Sabores, con aislamiento multi-organización
+> garantizado también en PostgreSQL), ya existe el ledger append-only de
+> movimientos de inventario -- el stock nunca se edita directamente, siempre
+> es la suma de sus movimientos -- con stock inicial, ajustes y reversiones
+> operables desde el panel de Admin. Todavía no implementa la experiencia
+> operativa de la heladería (conteo semanal, mermas, baja de lata, ventas,
+> caja, cierres, transferencias, etc.) — ver
+> [`docs/ETAPA-3-MOTOR-INVENTARIO.md`](docs/ETAPA-3-MOTOR-INVENTARIO.md) y
+> [`docs/INVARIANTES-INVENTARIO.md`](docs/INVARIANTES-INVENTARIO.md) para el
+> detalle completo de qué se construyó y qué queda explícitamente pendiente.
 
 ## Documentación de arquitectura
 
@@ -26,6 +27,8 @@ compartidos.
 - [`docs/ETAPA-2-CATALOGO-MAESTROS.md`](docs/ETAPA-2-CATALOGO-MAESTROS.md) — módulo de catálogo (productos, categorías, sabores), importador inicial, staging.
 - [`docs/ETAPA-2-PRUEBA-MANUAL.md`](docs/ETAPA-2-PRUEBA-MANUAL.md) — checklist para probar el sistema personalmente.
 - [`docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md`](docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md) — foreign keys compuestas para garantizar el aislamiento multi-organización del catálogo a nivel de PostgreSQL.
+- [`docs/ETAPA-3-MOTOR-INVENTARIO.md`](docs/ETAPA-3-MOTOR-INVENTARIO.md) — ledger de movimientos de inventario, stock teórico, ajustes, reversiones, auditoría transaccional.
+- [`docs/INVARIANTES-INVENTARIO.md`](docs/INVARIANTES-INVENTARIO.md) — contrato técnico corto del motor de inventario, para etapas futuras.
 
 ## Estructura del monorepo
 
@@ -117,22 +120,27 @@ vincula al sistema — no hay seed de usuarios reales (ver
 
 ## Tests y CI
 
-120 tests (Vitest) en 22 archivos, backend y ambos frontends. Los tests de
+163 tests (Vitest) en 24 archivos, backend y ambos frontends. Los tests de
 `apps/api` corren contra una base PostgreSQL real (no mockeada), incluyendo
 tests de integridad a nivel de base de datos que bypasean la API para
-confirmar el aislamiento multi-organización (Etapa 2.1). CI en GitHub
-Actions (`.github/workflows/ci.yml`): instala, genera y migra la base contra
-un Postgres de servicio, y corre lint, formato, typecheck, tests y build en
+confirmar el aislamiento multi-organización (Etapa 2.1) y las garantías del
+ledger de inventario (Etapa 3: FKs compuestas, CHECK constraints, índice
+único de stock inicial, idempotencia). CI en GitHub Actions
+(`.github/workflows/ci.yml`): instala, genera y migra la base contra un
+Postgres de servicio, y corre lint, formato, typecheck, tests y build en
 cada push/PR — sin ningún paso de deploy. Ver detalle en
 `docs/ETAPA-1-BASE-CORE.md`, secciones 16 y 17,
-`docs/ETAPA-2-CATALOGO-MAESTROS.md`, sección 14, y
-`docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md`, secciones 9 a 11.
+`docs/ETAPA-2-CATALOGO-MAESTROS.md`, sección 14,
+`docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md`, secciones 9 a 11, y
+`docs/ETAPA-3-MOTOR-INVENTARIO.md`, sección 23.
 
 ## Estado del proyecto
 
-Etapa 2.1 (Integridad multi-organización en catálogo) completa, pendiente de
-auditoría externa antes de avanzar a la siguiente etapa. El sistema tiene base
-técnica, gestión de usuarios y catálogo (con el catálogo real del cliente
-importable), con el aislamiento entre organizaciones garantizado también a
-nivel de PostgreSQL en las relaciones de catálogo; todavía no hay motor de
-inventario (stock, ventas, caja, mermas, cierres, etc.).
+Etapa 3 (Motor de Inventario / Ledger de Stock) completa, pendiente de
+auditoría externa antes de avanzar a la siguiente etapa. El sistema tiene
+base técnica, gestión de usuarios, catálogo (con aislamiento
+multi-organización garantizado en PostgreSQL) y el ledger central de
+inventario -- stock teórico siempre calculado desde los movimientos, nunca
+un valor editable, con stock inicial/ajustes/reversiones operables desde el
+panel de Admin; todavía no hay experiencia operativa de heladería (conteo,
+mermas, ventas, caja, cierres, transferencias, etc.).

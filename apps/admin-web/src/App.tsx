@@ -6,13 +6,17 @@ import { UsersPage } from './pages/UsersPage.js';
 import { CategoriesPage } from './pages/CategoriesPage.js';
 import { FlavorsPage } from './pages/FlavorsPage.js';
 import { ProductsPage } from './pages/ProductsPage.js';
+import { InventoryStockPage } from './pages/InventoryStockPage.js';
+import { InventoryMovementsPage } from './pages/InventoryMovementsPage.js';
 import { Layout } from './components/Layout.js';
 
 /**
- * Routing (Etapa 1 + Etapa 2, sección 15 del prompt de Etapa 2): login, layout,
- * rutas protegidas y las pantallas de catálogo/maestros. Ninguna pantalla operativa
- * de inventario (conteo, stock, ventas, caja, cierres) se implementa acá -- eso es
- * de etapas futuras.
+ * Routing (Etapa 1, 2 y 3): login, layout, rutas protegidas, pantallas de
+ * catálogo/maestros y el panel administrativo del motor de inventario (Stock,
+ * Movimientos -- ver docs/ETAPA-3-MOTOR-INVENTARIO.md, sección "Admin Web").
+ * Ninguna pantalla OPERATIVA de inventario (conteo, mermas, baja de lata,
+ * ventas, caja, cierres) se implementa acá todavía -- eso es de etapas
+ * futuras, y corresponde a la Shop PWA, no a este panel de escritorio.
  */
 export function App() {
   return (
@@ -56,6 +60,22 @@ export function App() {
           element={
             <RequireAuth roles={['ADMIN']}>
               <ProductsPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="stock"
+          element={
+            <RequireAuth roles={['ADMIN']}>
+              <InventoryStockPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="movimientos"
+          element={
+            <RequireAuth roles={['ADMIN']}>
+              <InventoryMovementsPage />
             </RequireAuth>
           }
         />

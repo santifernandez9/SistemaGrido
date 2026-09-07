@@ -4,3 +4,4 @@ export * from './audit.js';
 export * from './user.js';
 export * from './api.js';
 export * from './catalog.js';
+export * from './inventory.js';

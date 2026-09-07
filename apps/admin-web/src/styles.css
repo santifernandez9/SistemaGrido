@@ -211,3 +211,76 @@ button.secondary {
   font-style: italic;
   padding: 16px 0;
 }
+
+/* Etapa 3 — motor de inventario */
+
+.badge-warn {
+  background: #fdecea;
+  color: #b3261e;
+}
+
+.filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-end;
+  margin-bottom: 16px;
+}
+
+.filters label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+}
+
+.negative-quantity {
+  color: #b3261e;
+  font-weight: 600;
+}
+
+.pagination {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.movement-row {
+  cursor: pointer;
+}
+
+.movement-row:hover {
+  background: #fafafa;
+}
+
+.detail-panel {
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #e5e5e5;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px 24px;
+  margin: 12px 0;
+}
+
+.detail-grid dt {
+  font-size: 12px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.detail-grid dd {
+  margin: 0;
+  font-size: 14px;
+}
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #666;
+}

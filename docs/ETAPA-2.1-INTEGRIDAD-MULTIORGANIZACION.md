@@ -43,15 +43,15 @@ Se revisó **cada relación entre entidades creadas o tocadas en Etapa 2**, más
 las relaciones de Etapa 1 que comparten la misma forma (para clasificarlas,
 aunque su corrección quede fuera de alcance de este prompt).
 
-| Entidad hija | Entidad padre | Scope hija | Scope padre | Protección backend (Etapa 2) | Protección DB (antes de 2.1) | Protección DB (después de 2.1) |
-| --- | --- | --- | --- | --- | --- | --- |
-| Product | Category | Por organización | Por organización | `assertCategoryValid` | FK simple (`categoryId → category.id`) | **FK compuesta** (`organizationId, categoryId → category.organizationId, category.id`) |
-| Product | ProductType | Por organización | Por organización | `assertProductTypeValid` | FK simple | **FK compuesta** |
-| Product | UnitOfMeasure | Por organización | Por organización | `assertUnitOfMeasureValid` | FK simple | **FK compuesta** |
-| Product | Flavor (opcional) | Por organización | Por organización | `assertFlavorValid` | FK simple | **FK compuesta** (no se exige si `flavorId` es NULL) |
-| Category | Category (grupo padre, opcional) | Por organización | Por organización | `assertValidParentCategory` | FK simple (self-referencial) | **FK compuesta** (no se exige si `parentCategoryId` es NULL) |
-| Product | Organization | Por organización | Raíz | — (`organizationId` viene del usuario autenticado, nunca del body) | FK simple | Sin cambio (ya es la relación raíz, no hay ambigüedad posible) |
-| Category / ProductType / UnitOfMeasure / Flavor | Organization | Por organización | Raíz | ídem | FK simple | Sin cambio (mismo motivo) |
+| Entidad hija                                    | Entidad padre                    | Scope hija       | Scope padre      | Protección backend (Etapa 2)                                       | Protección DB (antes de 2.1)           | Protección DB (después de 2.1)                                                         |
+| ----------------------------------------------- | -------------------------------- | ---------------- | ---------------- | ------------------------------------------------------------------ | -------------------------------------- | -------------------------------------------------------------------------------------- |
+| Product                                         | Category                         | Por organización | Por organización | `assertCategoryValid`                                              | FK simple (`categoryId → category.id`) | **FK compuesta** (`organizationId, categoryId → category.organizationId, category.id`) |
+| Product                                         | ProductType                      | Por organización | Por organización | `assertProductTypeValid`                                           | FK simple                              | **FK compuesta**                                                                       |
+| Product                                         | UnitOfMeasure                    | Por organización | Por organización | `assertUnitOfMeasureValid`                                         | FK simple                              | **FK compuesta**                                                                       |
+| Product                                         | Flavor (opcional)                | Por organización | Por organización | `assertFlavorValid`                                                | FK simple                              | **FK compuesta** (no se exige si `flavorId` es NULL)                                   |
+| Category                                        | Category (grupo padre, opcional) | Por organización | Por organización | `assertValidParentCategory`                                        | FK simple (self-referencial)           | **FK compuesta** (no se exige si `parentCategoryId` es NULL)                           |
+| Product                                         | Organization                     | Por organización | Raíz             | — (`organizationId` viene del usuario autenticado, nunca del body) | FK simple                              | Sin cambio (ya es la relación raíz, no hay ambigüedad posible)                         |
+| Category / ProductType / UnitOfMeasure / Flavor | Organization                     | Por organización | Raíz             | ídem                                                               | FK simple                              | Sin cambio (mismo motivo)                                                              |
 
 Relaciones de Etapa 1 con la misma forma de riesgo, **fuera de alcance de este
 prompt** (el prompt pide corregir específicamente el catálogo de Etapa 2), se
@@ -132,7 +132,7 @@ verificados manualmente en la base de datos de desarrollo:
   `product_organization_id_flavor_id_fkey`.
 - Las 2 relaciones nullable (`parent_category_id`, `flavor_id`) usan el
   comportamiento estándar de PostgreSQL para FKs compuestas con `MATCH
-  SIMPLE` (el default): si **cualquier** columna de la FK es NULL, la
+SIMPLE` (el default): si **cualquier** columna de la FK es NULL, la
   constraint no se evalúa para esa fila. Es el comportamiento correcto y
   buscado: una categoría raíz (`parentCategoryId = NULL`) o un producto sin
   sabor (`flavorId = NULL`) siguen permitidos sin restricción adicional.
@@ -202,13 +202,13 @@ Los 112 tests reportados al cierre de Etapa 2 siguen pasando sin
 modificarse ni deshabilitarse ninguno. Total actual: **120 tests** (112 +
 8 nuevos), en 22 archivos, 0 fallos:
 
-| Paquete | Tests |
-| --- | --- |
-| `packages/db` | 10 |
-| `apps/admin-web` | 16 |
-| `apps/api` | 90 (82 previos + 8 nuevos) |
-| `apps/shop-pwa` | 4 |
-| **Total** | **120** |
+| Paquete          | Tests                      |
+| ---------------- | -------------------------- |
+| `packages/db`    | 10                         |
+| `apps/admin-web` | 16                         |
+| `apps/api`       | 90 (82 previos + 8 nuevos) |
+| `apps/shop-pwa`  | 4                          |
+| **Total**        | **120**                    |
 
 ## 11. Resultado de calidad
 
@@ -256,7 +256,7 @@ automática.
 **No bloqueantes**:
 
 - `AppUser.defaultLocationId → Location.id` y `AuditLog.locationId →
-  Location.id` (ambas Etapa 1) tienen la misma forma de riesgo descrita en
+Location.id` (ambas Etapa 1) tienen la misma forma de riesgo descrita en
   la sección 1 (FK simple entre dos entidades por-organización) pero quedan
   fuera de alcance de este prompt, que pide corregir específicamente el
   catálogo de Etapa 2. Se documentan acá para que quede explícito y no se

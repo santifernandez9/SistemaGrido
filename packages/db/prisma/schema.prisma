@@ -62,14 +62,15 @@ model Organization {
   timezone  String   @default("America/Argentina/Cordoba")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  locations      Location[]
-  users          AppUser[]
-  auditLogs      AuditLog[]
-  categories     Category[]
-  productTypes   ProductType[]
-  unitsOfMeasure UnitOfMeasure[]
-  flavors        Flavor[]
-  products       Product[]
+  locations          Location[]
+  users              AppUser[]
+  auditLogs          AuditLog[]
+  categories         Category[]
+  productTypes       ProductType[]
+  unitsOfMeasure     UnitOfMeasure[]
+  flavors            Flavor[]
+  products           Product[]
+  inventoryMovements InventoryMovement[]
 
   @@map("organization")
 }
@@ -82,11 +83,16 @@ model Location {
   active         Boolean      @default(true)
   createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  users        AppUser[]
-  auditLogs    AuditLog[]
+  organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  users              AppUser[]
+  auditLogs          AuditLog[]
+  inventoryMovements InventoryMovement[]
 
   @@unique([organizationId, name])
+  /// Habilita FKs compuestas (organizationId, locationId) desde AppUser,
+  /// AuditLog e InventoryMovement — Etapa 3 (ver
+  /// docs/ETAPA-3-MOTOR-INVENTARIO.md, sección "Multi-organización").
+  @@unique([organizationId, id])
   @@index([organizationId])
   @@map("location")
 }
@@ -124,13 +130,27 @@ model AppUser {
   createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  role           Role         @relation(fields: [roleId], references: [id], onDelete: Restrict)
-  defaultLocation Location?   @relation(fields: [defaultLocationId], references: [id], onDelete: SetNull)
-  auditLogs      AuditLog[]
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  role         Role         @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  /// FK compuesta (organizationId, defaultLocationId) -> Location(organizationId, id):
+  /// pendiente detectado en Etapa 2.1 (docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md,
+  /// sección 14), corregido acá porque Etapa 3 ya necesita tocar AppUser/Location
+  /// para el ledger y es seguro hacerlo sin ampliar alcance funcional. Nullable
+  /// (NULL para ADMIN): Postgres no exige la FK cuando lo es. `onDelete: Restrict`
+  /// (antes `SetNull` en la FK simple de Etapa 1): con FK compuesta, `SetNull`
+  /// intentaría poner en NULL también `organizationId`, que es NOT NULL --
+  /// Prisma lo señala como advertencia de esquema inválido. `Restrict` es
+  /// coherente con el resto del esquema y con que `Location` nunca se borra
+  /// físicamente (baja lógica vía `active`, Etapa 2).
+  defaultLocation    Location?           @relation(fields: [organizationId, defaultLocationId], references: [organizationId, id], onDelete: Restrict)
+  auditLogs          AuditLog[]
+  inventoryMovements InventoryMovement[]
 
   @@index([organizationId])
   @@index([roleId])
+  /// Habilita FKs compuestas (organizationId, userId) desde AuditLog e
+  /// InventoryMovement (createdBy) — Etapa 3.
+  @@unique([organizationId, id])
   @@map("app_user")
 }
 
@@ -159,8 +179,14 @@ model AuditLog {
   occurredAt     DateTime    @default(now()) @map("occurred_at") @db.Timestamptz(6)
 
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  user         AppUser?     @relation(fields: [userId], references: [id], onDelete: SetNull)
-  location     Location?    @relation(fields: [locationId], references: [id], onDelete: SetNull)
+  /// FKs compuestas (organizationId, userId) y (organizationId, locationId):
+  /// mismo pendiente de Etapa 2.1, corregido junto con AppUser.defaultLocationId
+  /// en Etapa 3 (ver docs/ETAPA-3-MOTOR-INVENTARIO.md). Ambas nullable: Postgres
+  /// no exige la FK cuando lo son (evento de sistema sin actor/ubicación).
+  /// `onDelete: Restrict` por el mismo motivo que en AppUser.defaultLocation
+  /// (SetNull es inválido en una FK compuesta con organizationId NOT NULL).
+  user     AppUser?  @relation(fields: [organizationId, userId], references: [organizationId, id], onDelete: Restrict)
+  location Location? @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
 
   @@index([organizationId, entityType, entityId])
   @@index([organizationId, occurredAt])
@@ -255,8 +281,9 @@ model UnitOfMeasure {
   active         Boolean  @default(true)
   createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  products     Product[]
+  organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  products           Product[]
+  inventoryMovements InventoryMovement[]
 
   @@unique([organizationId, code])
   /// Habilita la FK compuesta (organizationId, unitOfMeasureId) en Product — Etapa 2.1.
@@ -337,10 +364,183 @@ model Product {
   productType   ProductType   @relation(fields: [organizationId, productTypeId], references: [organizationId, id], onDelete: Restrict)
   unitOfMeasure UnitOfMeasure @relation(fields: [organizationId, unitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
   flavor        Flavor?       @relation(fields: [organizationId, flavorId], references: [organizationId, id], onDelete: Restrict)
+  inventoryMovements InventoryMovement[]
 
   @@unique([organizationId, code])
+  /// Habilita la FK compuesta (organizationId, productId) desde InventoryMovement — Etapa 3.
+  @@unique([organizationId, id])
   @@index([organizationId])
   @@index([categoryId])
   @@index([flavorId])
   @@map("product")
+}
+
+// ---------------------------------------------------------------------------
+// Motor de inventario / ledger (Etapa 3) — ver docs/ETAPA-3-MOTOR-INVENTARIO.md
+// y docs/INVARIANTES-INVENTARIO.md.
+//
+// Principio (CONFIRMADO, Doc §3.2/§10, RN-007): el stock es siempre una
+// CONSECUENCIA de los movimientos del ledger, nunca un número editable. No
+// existe ninguna columna "stock_actual": todo cálculo de stock teórico se
+// hace agregando InventoryMovement en el momento de la consulta (sección
+// "Cálculo de stock teórico" del documento de Etapa 3).
+//
+// Append-only (RN-008/RN-009): un InventoryMovement nunca se edita ni se
+// borra una vez creado. Una corrección genera un movimiento de reversión
+// nuevo (`reversesMovementId`) que referencia al original, que a su vez pasa
+// a `status = REVERSED` — nunca se muta `quantity` de un movimiento existente.
+
+/// Tipos de movimiento (RF-010, CONFIRMADO — lista textual del cliente, Doc
+/// §10). El enum completo se declara ahora porque forma parte del dominio ya
+/// confirmado y así ninguna etapa futura necesita una migración sólo para
+/// agregar un valor a este enum (evitando un ALTER TYPE sobre una tabla que
+/// crecerá continuamente) — pero sólo un subconjunto tiene, en esta etapa,
+/// un servicio/endpoint que efectivamente lo genere (ver docs/ETAPA-3-MOTOR-INVENTARIO.md,
+/// sección "Tipos de movimiento", que distingue IMPLEMENTADO de RESERVADO).
+///
+/// IMPLEMENTADO en Etapa 3: INITIAL_STOCK, ADJUSTMENT (y la reversión
+/// genérica, que reutiliza el tipo del movimiento original).
+/// RESERVADO/PREPARADO (el valor existe para integridad referencial futura,
+/// ningún endpoint de Etapa 3 lo genera todavía): PURCHASE_RECEIPT,
+/// TRANSFER_OUT, TRANSFER_IN, SALE, BOM_CONSUMPTION, WASTE,
+/// ICE_CREAM_CONTAINER_CLOSE, EXTERNAL_OUT, COUNT_CORRECTION.
+enum MovementType {
+  INITIAL_STOCK
+  PURCHASE_RECEIPT
+  TRANSFER_OUT
+  TRANSFER_IN
+  SALE
+  BOM_CONSUMPTION
+  WASTE
+  ICE_CREAM_CONTAINER_CLOSE
+  ADJUSTMENT
+  EXTERNAL_OUT
+  COUNT_CORRECTION
+
+  @@map("movement_type")
+}
+
+/// Estado del movimiento (arquitectura Etapa 0, sección 10.3/11.4). NO es un
+/// filtro del cálculo de stock teórico -- el saldo siempre suma TODOS los
+/// movimientos (activos y revertidos), porque la reversión ya aporta su
+/// propia cantidad de signo opuesto (ver apps/api/src/services/inventory-ledger.ts,
+/// `getStockBalances`); excluir los REVERSED del SUM restaría el original
+/// sin sumar de vuelta su efecto y dejaría el saldo mal calculado. `status`
+/// sirve sólo para trazabilidad (marcar qué movimiento fue corregido) y como
+/// guarda contra una doble reversión del mismo movimiento (sólo se puede
+/// revertir un movimiento con status = ACTIVE).
+enum MovementStatus {
+  ACTIVE
+  REVERSED
+
+  @@map("movement_status")
+}
+
+/// Ledger central de movimientos de inventario (RF-009, RN-007..RN-010,
+/// CONFIRMADO). Única puerta de escritura de stock del sistema — ver
+/// apps/api/src/services/inventory-ledger.ts.
+model InventoryMovement {
+  id             String         @id @default(uuid()) @db.Uuid
+  organizationId String         @map("organization_id") @db.Uuid
+  locationId     String         @map("location_id") @db.Uuid
+  productId      String         @map("product_id") @db.Uuid
+  movementType   MovementType   @map("movement_type")
+
+  /// Cantidad normalizada a la unidad canónica del producto ("unidades
+  /// sueltas", el mismo concepto que `Product.unitsPerHandlingUnit` ya usa
+  /// desde Etapa 2 — RESPALDADO, no una entidad nueva). Con signo: entradas
+  /// positivas, salidas negativas (RN-010, arquitectura Etapa 0 §10.3). Es
+  /// la que se usa para calcular el stock teórico (SUM). NUMERIC en vez de
+  /// float de JS/Postgres double precision, para no perder precisión al
+  /// sumar miles de movimientos -- ver docs/ETAPA-3-MOTOR-INVENTARIO.md,
+  /// sección "Cantidades y precisión", sobre la escala elegida.
+  quantity Decimal @db.Decimal(14, 3)
+
+  /// Cantidad tal como la tipeó el usuario, en `entryUnitOfMeasureId` (RN-006:
+  /// "el usuario nunca calcula la conversión a mano"). Mismo signo que
+  /// `quantity`. Se conserva junto al factor usado para que la pantalla
+  /// pueda mostrar "2 cajas" además del canónico, sin recalcular.
+  enteredQuantity Decimal @map("entered_quantity") @db.Decimal(14, 3)
+
+  /// Unidad en la que se cargó el movimiento (p. ej. la unidad de manejo del
+  /// producto). FK compuesta multi-organización -- sección "Multi-organización".
+  entryUnitOfMeasureId String @map("entry_unit_of_measure_id") @db.Uuid
+
+  /// Factor de conversión (equivalente a `Product.unitsPerHandlingUnit`)
+  /// vigente EN EL MOMENTO del movimiento, copiado acá a propósito: si más
+  /// adelante se corrige la equivalencia del producto en el catálogo, los
+  /// movimientos históricos no deben cambiar de cantidad canónica (sección 6
+  /// del prompt de Etapa 3: "las equivalencias históricas no deben provocar
+  /// que un movimiento viejo cambie de cantidad"). `quantity = enteredQuantity
+  /// * conversionFactor` se calcula una sola vez, al crear el movimiento.
+  conversionFactor Int @map("conversion_factor")
+
+  /// Obligatorio quedar registrado por aplicación para ADJUSTMENT (y
+  /// COUNT_CORRECTION cuando exista) -- ver el CHECK agregado a mano en la
+  /// migración (Prisma no expresa un NOT NULL condicional declarativamente),
+  /// mismo patrón que el CHECK de `units_per_handling_unit` de Etapa 2.
+  reason String?
+
+  /// Referencia al documento que originó el movimiento cuando corresponde
+  /// (venta, remito, merma, conteo, etc.) -- RESERVADO: ningún documento de
+  /// ese tipo existe todavía en Etapa 3, pero el campo ya está preparado
+  /// para que las etapas futuras no necesiten otra migración del ledger.
+  sourceDocumentType String? @map("source_document_type")
+  sourceDocumentId   String? @map("source_document_id") @db.Uuid
+
+  /// Clave de idempotencia opcional para futuros orígenes externos
+  /// (importaciones, ventas, cierres -- sección 14 del prompt de Etapa 3:
+  /// "el motor debe quedar preparado para recibir movimientos... de
+  /// procesos automáticos"). Ninguna operación de Etapa 3 la exige todavía
+  /// (son altas manuales de Admin, no eventos externos repetibles), pero el
+  /// mecanismo -- único por organización cuando está presente -- ya existe.
+  idempotencyKey String? @map("idempotency_key")
+
+  /// Movimiento original que este movimiento revierte (sección 13 del
+  /// prompt: "una reversión debe preservar movimiento original, crear
+  /// movimiento compensatorio, vincular ambos"). FK compuesta
+  /// multi-organización auto-referencial -- una reversión sólo puede
+  /// apuntar a un movimiento de la misma organización.
+  reversesMovementId String? @map("reverses_movement_id") @db.Uuid
+
+  status MovementStatus @default(ACTIVE)
+
+  /// Fecha efectiva del movimiento (puede ser anterior al registro -- p. ej.
+  /// un stock inicial cargado hoy pero efectivo desde el conteo físico de
+  /// ayer). Distinta de `createdAt` (fecha de registro en el sistema),
+  /// sección 4 del prompt de Etapa 3.
+  occurredAt DateTime @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  /// Usuario individual responsable (nunca una cuenta compartida de rol --
+  /// sección 19 del prompt, P-001 ya resuelto). FK compuesta multi-organización.
+  createdById String @map("created_by") @db.Uuid
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  /// FKs compuestas (organizationId, x) -> Master(organizationId, id):
+  /// aplica a este ledger lo aprendido en Etapa 2.1 -- ningún movimiento
+  /// puede referenciar una ubicación, producto, unidad, usuario u otro
+  /// movimiento de una organización distinta. Ver "Multi-organización" en
+  /// docs/ETAPA-3-MOTOR-INVENTARIO.md.
+  location            Location           @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  product              Product            @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  entryUnitOfMeasure   UnitOfMeasure      @relation(fields: [organizationId, entryUnitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
+  createdBy            AppUser            @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+  reversesMovement     InventoryMovement? @relation("MovementReversal", fields: [organizationId, reversesMovementId], references: [organizationId, id], onDelete: Restrict)
+  reversedByMovements  InventoryMovement[] @relation("MovementReversal")
+
+  @@unique([organizationId, id])
+  /// Idempotencia (sección 14 del prompt): un mismo evento externo (mismo
+  /// idempotencyKey) no puede generar dos movimientos en la misma
+  /// organización. NULL no colisiona con NULL (semántica estándar de
+  /// PostgreSQL en UNIQUE), así que las altas manuales sin clave conviven
+  /// sin problema.
+  @@unique([organizationId, idempotencyKey])
+  /// Consulta principal de stock teórico y de historial (sección 9/22 del
+  /// prompt): agregación/filtro por ubicación+producto, ordenado por fecha.
+  @@index([organizationId, locationId, productId, occurredAt])
+  /// Trazabilidad por documento de origen (sección 29 del prompt).
+  @@index([organizationId, sourceDocumentType, sourceDocumentId])
+  @@index([organizationId, movementType])
+  @@map("inventory_movement")
 }

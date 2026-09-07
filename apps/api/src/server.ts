@@ -19,6 +19,7 @@ import flavorsRoutes from './routes/flavors.js';
 import productTypesRoutes from './routes/product-types.js';
 import unitsOfMeasureRoutes from './routes/units-of-measure.js';
 import productsRoutes from './routes/products.js';
+import inventoryRoutes from './routes/inventory.js';
 
 /**
  * Arma la app de Fastify sin escucharla en un puerto -- así `src/index.ts` la usa
@@ -69,6 +70,7 @@ export async function buildServer(overrides?: Partial<AppConfig>): Promise<Fasti
   await app.register(productTypesRoutes);
   await app.register(unitsOfMeasureRoutes);
   await app.register(productsRoutes);
+  await app.register(inventoryRoutes);
 
   return app;
 }

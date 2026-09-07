@@ -1369,6 +1369,29 @@ _(Extracto representativo — la trazabilidad completa RF↔RN↔Entidad↔Módu
 > ventas/BOM funcional) está documentado con el detalle real, campo por campo, en
 > `docs/ETAPA-2-CATALOGO-MAESTROS.md`, sección "Trazabilidad". Esta tabla histórica
 > no se reescribe.
+>
+> **Actualización (Etapa 3)**: la fila "RF-009, RF-010, RF-015..018 (Ledger...)" de
+> abajo también describe el plan original. Lo efectivamente implementado -- y,
+> sobre todo, lo que NO se implementó todavía aunque el ledger ya podría
+> soportarlo -- está en `docs/ETAPA-3-MOTOR-INVENTARIO.md`. Resumen de estado real
+> por requisito (no se marca nada como IMPLEMENTADO sólo porque el ledger genérico
+> pueda soportarlo eventualmente):
+>
+> | Requisito                                                                                         | Estado real (Etapa 3)                                                                                                                                                                  |
+> | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+> | RF-009 (ledger central)                                                                           | **IMPLEMENTADO**                                                                                                                                                                       |
+> | RF-010 (tipos de movimiento)                                                                      | **IMPLEMENTADO** el enum completo; sólo `INITIAL_STOCK`/`ADJUSTMENT` con endpoint que los genera -- el resto queda **PREPARADO**                                                       |
+> | RF-011 (stock inicial)                                                                            | **IMPLEMENTADO**, pero como mecanismo administrativo (Admin Web), no como la pantalla de conteo que preveía el plan original -- ver "Desviaciones" en docs/ETAPA-3-MOTOR-INVENTARIO.md |
+> | RF-015 (stock teórico)                                                                            | **IMPLEMENTADO**                                                                                                                                                                       |
+> | RF-016 (diferencia = real − teórico)                                                              | **NO IMPLEMENTADO** -- depende de `stock_count` (conteo), que no existe todavía                                                                                                        |
+> | RF-017 (justificar diferencias)                                                                   | **NO IMPLEMENTADO** -- depende de RF-016                                                                                                                                               |
+> | RF-018 (cierre de conteo → `COUNT_CORRECTION`)                                                    | **PREPARADO** el tipo de movimiento en el enum; **NO IMPLEMENTADO** el mecanismo (depende de `stock_count`)                                                                            |
+> | RF-012..014, RF-019..023 (conteo, latas/granel, umbral de reconteo, sin stock, consumo por sabor) | **NO IMPLEMENTADO** -- ninguna tabla (`stock_count`, `stockout_event`) se creó en Etapa 3, ver "Limitaciones" en docs/ETAPA-3-MOTOR-INVENTARIO.md                                      |
+> | RF-024..026 (mermas/gasto)                                                                        | **NO IMPLEMENTADO** -- `waste_event`/`variable_expense` no se crearon; `WASTE` sólo existe como valor **PREPARADO** del enum                                                           |
+> | Ajuste manual (RN-008, no tiene número de RF propio en Etapa 0)                                   | **IMPLEMENTADO**                                                                                                                                                                       |
+> | Reversión de movimientos (sección 11.4 de este documento)                                         | **IMPLEMENTADO**, mecanismo genérico                                                                                                                                                   |
+> | Auditoría transaccional para operaciones críticas (docs/ETAPA-1.1-CORRECCIONES.md, sección 7.1)   | **IMPLEMENTADO** para stock inicial/ajuste/reversión                                                                                                                                   |
+> | FKs compuestas multi-organización en el ledger (aprendizaje de Etapa 2.1)                         | **IMPLEMENTADO**                                                                                                                                                                       |
 
 | Requisito                                                                                         | Regla(s)                         | Entidad(es)                                                    | Módulo                                                       | Etapa (backend/schema → completo)          | Tipo de prueba                                                                |
 | ------------------------------------------------------------------------------------------------- | -------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------ | ----------------------------------------------------------------------------- |

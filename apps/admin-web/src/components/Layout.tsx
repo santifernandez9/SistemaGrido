@@ -15,6 +15,8 @@ export function Layout() {
               <Link to="/productos">Productos</Link>
               <Link to="/categorias">Categorías</Link>
               <Link to="/sabores">Sabores</Link>
+              <Link to="/stock">Stock</Link>
+              <Link to="/movimientos">Movimientos</Link>
               <Link to="/usuarios">Usuarios</Link>
             </>
           )}
