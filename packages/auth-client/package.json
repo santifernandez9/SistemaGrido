@@ -7,7 +7,7 @@
   "types": "./src/index.ts",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "echo \"(sin tests unitarios propios; ver apps/admin-web y apps/shop-pwa)\" && exit 0"
+    "test": "vitest run"
   },
   "dependencies": {
     "@sistema-grido/shared-types": "*",
@@ -21,6 +21,7 @@
   "devDependencies": {
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.5",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "vitest": "^4.1.11"
   }
 }

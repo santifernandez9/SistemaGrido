@@ -36,7 +36,12 @@ export function createApiClient({ baseUrl, supabase }: ApiClientOptions) {
     const response = await fetch(`${baseUrl}${path}`, {
       ...init,
       headers: {
-        'Content-Type': 'application/json',
+        // Sólo se declara JSON cuando realmente hay body: un POST sin payload
+        // (ej. `api.post('/api/auth/session')`) no debe mandar
+        // `Content-Type: application/json` con el body vacío -- Fastify lo
+        // interpreta como "viene un JSON" y responde 400 antes de ejecutar
+        // la ruta, aunque esta no espere ningún body.
+        ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...init.headers,
       },
