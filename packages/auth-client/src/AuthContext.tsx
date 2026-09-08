@@ -10,8 +10,31 @@ export interface AuthState {
   loading: boolean;
   error: string | null;
   api: ApiClient;
+  /**
+   * true mientras Supabase reporta que la sesión activa viene de un enlace de
+   * recuperación de contraseña (evento `PASSWORD_RECOVERY` de
+   * `onAuthStateChange`) -- ver `requestPasswordReset`/`updatePassword` más
+   * abajo. Vuelve a `false` en cuanto se cierra esa sesión.
+   */
+  passwordRecovery: boolean;
   signIn(email: string, password: string): Promise<void>;
   signOut(): Promise<void>;
+  /**
+   * "Olvidé mi contraseña": pide a Supabase Auth que envíe el email de
+   * recuperación. `redirectTo` lo arma el llamador (normalmente
+   * `${window.location.origin}/reset-password`) -- este paquete no asume
+   * ningún dominio ni entorno. Supabase ya no distingue, en su respuesta,
+   * si el email corresponde a una cuenta existente (ver sección 6 del
+   * prompt de recuperación de contraseña); este método no agrega ninguna
+   * distinción propia.
+   */
+  requestPasswordReset(email: string, redirectTo: string): Promise<void>;
+  /**
+   * Establece la nueva contraseña sobre la sesión de recuperación activa
+   * (`passwordRecovery` debe ser `true`). Nunca pasa por el backend de
+   * SistemaGrido -- es Supabase Auth quien la recibe y la guarda.
+   */
+  updatePassword(newPassword: string): Promise<void>;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
@@ -37,6 +60,7 @@ export function AuthProvider({ supabase, apiBaseUrl, children }: AuthProviderPro
   );
   const [user, setUser] = useState<UserProfile | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
+  const [passwordRecovery, setPasswordRecovery] = useState(false);
 
   const refreshProfile = useCallback(async () => {
     try {
@@ -66,6 +90,13 @@ export function AuthProvider({ supabase, apiBaseUrl, children }: AuthProviderPro
     const { data: subscription } = supabase.auth.onAuthStateChange((event) => {
       if (event === 'SIGNED_OUT') {
         setUser(null);
+        setPasswordRecovery(false);
+      }
+      // Se dispara cuando el usuario abre un enlace de recuperación de
+      // contraseña válido (ver `requestPasswordReset`/`updatePassword`) --
+      // patrón oficial de @supabase/supabase-js, no un mecanismo propio.
+      if (event === 'PASSWORD_RECOVERY') {
+        setPasswordRecovery(true);
       }
     });
 
@@ -101,13 +132,38 @@ export function AuthProvider({ supabase, apiBaseUrl, children }: AuthProviderPro
     setUser(null);
   }, [supabase, api]);
 
+  const requestPasswordReset = useCallback(
+    async (email: string, redirectTo: string) => {
+      const { error: resetError } = await supabase.auth.resetPasswordForEmail(email, {
+        redirectTo,
+      });
+      if (resetError) {
+        throw resetError;
+      }
+    },
+    [supabase],
+  );
+
+  const updatePassword = useCallback(
+    async (newPassword: string) => {
+      const { error: updateError } = await supabase.auth.updateUser({ password: newPassword });
+      if (updateError) {
+        throw updateError;
+      }
+    },
+    [supabase],
+  );
+
   const value: AuthState = {
     user,
     loading: user === undefined,
     error,
     api,
+    passwordRecovery,
     signIn,
     signOut,
+    requestPasswordReset,
+    updatePassword,
   };
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

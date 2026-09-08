@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom';
 import { RequireAuth } from '@sistema-grido/auth-client';
 import { LoginPage } from './pages/LoginPage.js';
+import { ResetPasswordPage } from './pages/ResetPasswordPage.js';
 import { DashboardPage } from './pages/DashboardPage.js';
 import { UsersPage } from './pages/UsersPage.js';
 import { CategoriesPage } from './pages/CategoriesPage.js';
@@ -17,11 +18,18 @@ import { Layout } from './components/Layout.js';
  * Ninguna pantalla OPERATIVA de inventario (conteo, mermas, baja de lata,
  * ventas, caja, cierres) se implementa acá todavía -- eso es de etapas
  * futuras, y corresponde a la Shop PWA, no a este panel de escritorio.
+ *
+ * `/reset-password` (recuperación/cambio de contraseña, ver
+ * docs/RECUPERACION-CONTRASENA.md) es, junto con `/login`, la única ruta
+ * pública -- deliberadamente FUERA de `RequireAuth`: a quien llega desde el
+ * enlace de recuperación de Supabase todavía no lo valida el backend como
+ * una sesión "normal".
  */
 export function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
       <Route
         path="/"
         element={
