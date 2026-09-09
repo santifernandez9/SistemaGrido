@@ -28,6 +28,16 @@ interface DeleteUserResult {
   error: { message: string } | null;
 }
 
+interface SignedUploadUrlResult {
+  data: { signedUrl: string; token: string; path: string } | null;
+  error: { message: string } | null;
+}
+
+interface SignedUrlResult {
+  data: { signedUrl: string } | null;
+  error: { message: string } | null;
+}
+
 let getUserResult: GetUserResult = {
   data: { user: null },
   error: { message: 'no configurado en el test' },
@@ -39,6 +49,29 @@ let inviteResult: InviteResult = {
 let deleteUserResult: DeleteUserResult = { data: {}, error: null };
 let deleteUserThrows: unknown = null;
 let deleteUserCalls: string[] = [];
+
+/** Etapa 4: doble de Supabase Storage (subida/lectura firmada de fotos y comprobantes). */
+let signedUploadUrlResult: SignedUploadUrlResult = {
+  data: { signedUrl: 'https://storage.test/upload?token=fake', token: 'fake-token', path: '' },
+  error: null,
+};
+let signedUrlResult: SignedUrlResult = {
+  data: { signedUrl: 'https://storage.test/read?token=fake' },
+  error: null,
+};
+let storageCalls: { method: string; bucket: string; path: string }[] = [];
+
+export function mockCreateSignedUploadUrl(result: SignedUploadUrlResult): void {
+  signedUploadUrlResult = result;
+}
+
+export function mockCreateSignedUrl(result: SignedUrlResult): void {
+  signedUrlResult = result;
+}
+
+export function getStorageCalls(): { method: string; bucket: string; path: string }[] {
+  return storageCalls;
+}
 
 export function mockGetUser(result: GetUserResult): void {
   getUserResult = result;
@@ -71,6 +104,12 @@ export function resetSupabaseMock(): void {
   deleteUserResult = { data: {}, error: null };
   deleteUserThrows = null;
   deleteUserCalls = [];
+  signedUploadUrlResult = {
+    data: { signedUrl: 'https://storage.test/upload?token=fake', token: 'fake-token', path: '' },
+    error: null,
+  };
+  signedUrlResult = { data: { signedUrl: 'https://storage.test/read?token=fake' }, error: null };
+  storageCalls = [];
 }
 
 export function createSupabaseMockModule() {
@@ -88,6 +127,25 @@ export function createSupabaseMockModule() {
             return Promise.resolve(deleteUserResult);
           },
         },
+      },
+      storage: {
+        from: (bucket: string) => ({
+          createSignedUploadUrl: (path: string) => {
+            storageCalls.push({ method: 'createSignedUploadUrl', bucket, path });
+            const result = signedUploadUrlResult;
+            if (result.data) {
+              return Promise.resolve({
+                data: { ...result.data, path: result.data.path || path },
+                error: null,
+              });
+            }
+            return Promise.resolve(result);
+          },
+          createSignedUrl: (path: string, _expiresIn: number) => {
+            storageCalls.push({ method: 'createSignedUrl', bucket, path });
+            return Promise.resolve(signedUrlResult);
+          },
+        }),
       },
     }),
   };

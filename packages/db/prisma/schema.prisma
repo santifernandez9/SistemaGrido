@@ -62,15 +62,20 @@ model Organization {
   timezone  String   @default("America/Argentina/Cordoba")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  locations          Location[]
-  users              AppUser[]
-  auditLogs          AuditLog[]
-  categories         Category[]
-  productTypes       ProductType[]
-  unitsOfMeasure     UnitOfMeasure[]
-  flavors            Flavor[]
-  products           Product[]
-  inventoryMovements InventoryMovement[]
+  locations           Location[]
+  users               AppUser[]
+  auditLogs           AuditLog[]
+  categories          Category[]
+  productTypes        ProductType[]
+  unitsOfMeasure      UnitOfMeasure[]
+  flavors             Flavor[]
+  products            Product[]
+  inventoryMovements  InventoryMovement[]
+  inventoryCounts     InventoryCount[]
+  inventoryCountItems InventoryCountItem[]
+  wastes              Waste[]
+  variableExpenses    VariableExpense[]
+  stockoutEvents      StockoutEvent[]
 
   @@map("organization")
 }
@@ -87,6 +92,9 @@ model Location {
   users              AppUser[]
   auditLogs          AuditLog[]
   inventoryMovements InventoryMovement[]
+  inventoryCounts    InventoryCount[]
+  variableExpenses   VariableExpense[]
+  stockoutEvents     StockoutEvent[]
 
   @@unique([organizationId, name])
   /// Habilita FKs compuestas (organizationId, locationId) desde AppUser,
@@ -111,27 +119,27 @@ model Role {
 /// sección 18.2, Opción A). Una fila = una persona física con cuenta propia en
 /// Supabase Auth. Nunca una cuenta compartida por rol/ubicación como identidad principal.
 model AppUser {
-  id                String    @id @default(uuid()) @db.Uuid
-  organizationId    String    @map("organization_id") @db.Uuid
-  roleId            String    @map("role_id") @db.Uuid
+  id                String   @id @default(uuid()) @db.Uuid
+  organizationId    String   @map("organization_id") @db.Uuid
+  roleId            String   @map("role_id") @db.Uuid
   /// Ubicación asignada. NULL para ADMIN (acceso a toda la organización) — ver
   /// docs/ETAPA-0-ANALISIS-ARQUITECTURA.md sección 7 (actores y permisos).
-  defaultLocationId String?   @map("default_location_id") @db.Uuid
-  displayName       String    @map("display_name")
+  defaultLocationId String?  @map("default_location_id") @db.Uuid
+  displayName       String   @map("display_name")
   /// Email de contacto/invitación. Campo agregado en Etapa 1 (no estaba en el
   /// sketch de Etapa 0): es una necesidad técnica del flujo de alta de usuarios
   /// vía Supabase Auth (invitación por email), no un requisito de negocio nuevo.
   /// Ver docs/ETAPA-1-BASE-CORE.md, sección "Desviaciones respecto de Etapa 0".
-  email             String    @unique
+  email             String   @unique
   /// id del usuario en Supabase Auth (auth.users.id). Es lo que llega en el JWT
   /// verificado por el backend en cada request.
-  authSubject       String    @unique @map("auth_subject")
-  active            Boolean   @default(true)
-  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  authSubject       String   @unique @map("auth_subject")
+  active            Boolean  @default(true)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  role         Role         @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  role               Role                @relation(fields: [roleId], references: [id], onDelete: Restrict)
   /// FK compuesta (organizationId, defaultLocationId) -> Location(organizationId, id):
   /// pendiente detectado en Etapa 2.1 (docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md,
   /// sección 14), corregido acá porque Etapa 3 ya necesita tocar AppUser/Location
@@ -145,12 +153,15 @@ model AppUser {
   defaultLocation    Location?           @relation(fields: [organizationId, defaultLocationId], references: [organizationId, id], onDelete: Restrict)
   auditLogs          AuditLog[]
   inventoryMovements InventoryMovement[]
+  inventoryCounts    InventoryCount[]
+  variableExpenses   VariableExpense[]
+  stockoutEvents     StockoutEvent[]
 
-  @@index([organizationId])
-  @@index([roleId])
   /// Habilita FKs compuestas (organizationId, userId) desde AuditLog e
   /// InventoryMovement (createdBy) — Etapa 3.
   @@unique([organizationId, id])
+  @@index([organizationId])
+  @@index([roleId])
   @@map("app_user")
 }
 
@@ -185,8 +196,8 @@ model AuditLog {
   /// no exige la FK cuando lo son (evento de sistema sin actor/ubicación).
   /// `onDelete: Restrict` por el mismo motivo que en AppUser.defaultLocation
   /// (SetNull es inválido en una FK compuesta con organizationId NOT NULL).
-  user     AppUser?  @relation(fields: [organizationId, userId], references: [organizationId, id], onDelete: Restrict)
-  location Location? @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  user         AppUser?     @relation(fields: [organizationId, userId], references: [organizationId, id], onDelete: Restrict)
+  location     Location?    @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
 
   @@index([organizationId, entityType, entityId])
   @@index([organizationId, occurredAt])
@@ -329,42 +340,44 @@ model Flavor {
 /// explícitamente fuera de Etapa 2), BOM (RF-007, fuera de Etapa 2), stock
 /// mínimo/ideal (pertenece al motor de inventario, fuera de Etapa 2).
 model Product {
-  id              String   @id @default(uuid()) @db.Uuid
-  organizationId  String   @map("organization_id") @db.Uuid
+  id                   String   @id @default(uuid()) @db.Uuid
+  organizationId       String   @map("organization_id") @db.Uuid
   /// Código de negocio legible, opcional (RF-001: la clave real es el `id`
   /// UUID; este campo es sólo una referencia humana, como la que ya usa el
   /// sistema actual -- p. ej. "P001"). Único por organización cuando se define;
   /// Postgres permite múltiples NULL en una constraint UNIQUE, así que un
   /// producto sin código no colisiona con otro.
-  code            String?
-  name            String
-  categoryId      String   @map("category_id") @db.Uuid
-  productTypeId   String   @map("product_type_id") @db.Uuid
-  unitOfMeasureId String   @map("unit_of_measure_id") @db.Uuid
+  code                 String?
+  name                 String
+  categoryId           String   @map("category_id") @db.Uuid
+  productTypeId        String   @map("product_type_id") @db.Uuid
+  unitOfMeasureId      String   @map("unit_of_measure_id") @db.Uuid
   /// Equivalencia/factor de conversión del producto (RF-002 "unidades por
   /// presentación"; RN-006 "factor de conversión del producto", singular):
   /// cuántas unidades sueltas contiene la unidad de manejo de este producto.
   /// 1 cuando la unidad de manejo ya es la unidad mínima (ej. LATA, UNIDAD).
-  unitsPerHandlingUnit Int  @default(1) @map("units_per_handling_unit")
+  unitsPerHandlingUnit Int      @default(1) @map("units_per_handling_unit")
   /// Sabor asociado, sólo para productos que lo tienen (RF-003). NULL para
   /// insumos, packaging, etc.
-  flavorId        String?  @map("flavor_id") @db.Uuid
-  active          Boolean  @default(true)
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  flavorId             String?  @map("flavor_id") @db.Uuid
+  active               Boolean  @default(true)
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   /// FKs compuestas (organizationId, xId) -> Master(organizationId, id) en las
   /// cuatro relaciones de abajo: garantizan en PostgreSQL que un producto no
   /// pueda referenciar una categoría/tipo/unidad/sabor de otra organización,
   /// además de la validación ya existente en el backend (Etapa 2.1 — ver
   /// docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md). flavorId es nullable:
   /// Postgres no exige la FK cuando es NULL (producto sin sabor).
-  category      Category      @relation(fields: [organizationId, categoryId], references: [organizationId, id], onDelete: Restrict)
-  productType   ProductType   @relation(fields: [organizationId, productTypeId], references: [organizationId, id], onDelete: Restrict)
-  unitOfMeasure UnitOfMeasure @relation(fields: [organizationId, unitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
-  flavor        Flavor?       @relation(fields: [organizationId, flavorId], references: [organizationId, id], onDelete: Restrict)
-  inventoryMovements InventoryMovement[]
+  category            Category             @relation(fields: [organizationId, categoryId], references: [organizationId, id], onDelete: Restrict)
+  productType         ProductType          @relation(fields: [organizationId, productTypeId], references: [organizationId, id], onDelete: Restrict)
+  unitOfMeasure       UnitOfMeasure        @relation(fields: [organizationId, unitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
+  flavor              Flavor?              @relation(fields: [organizationId, flavorId], references: [organizationId, id], onDelete: Restrict)
+  inventoryMovements  InventoryMovement[]
+  inventoryCountItems InventoryCountItem[]
+  stockoutEvents      StockoutEvent[]
 
   @@unique([organizationId, code])
   /// Habilita la FK compuesta (organizationId, productId) desde InventoryMovement — Etapa 3.
@@ -440,11 +453,11 @@ enum MovementStatus {
 /// CONFIRMADO). Única puerta de escritura de stock del sistema — ver
 /// apps/api/src/services/inventory-ledger.ts.
 model InventoryMovement {
-  id             String         @id @default(uuid()) @db.Uuid
-  organizationId String         @map("organization_id") @db.Uuid
-  locationId     String         @map("location_id") @db.Uuid
-  productId      String         @map("product_id") @db.Uuid
-  movementType   MovementType   @map("movement_type")
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @map("organization_id") @db.Uuid
+  locationId     String       @map("location_id") @db.Uuid
+  productId      String       @map("product_id") @db.Uuid
+  movementType   MovementType @map("movement_type")
 
   /// Cantidad normalizada a la unidad canónica del producto ("unidades
   /// sueltas", el mismo concepto que `Product.unitsPerHandlingUnit` ya usa
@@ -527,18 +540,21 @@ model InventoryMovement {
   /// sección 19 del prompt, P-001 ya resuelto). FK compuesta multi-organización.
   createdById String @map("created_by") @db.Uuid
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  organization        Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   /// FKs compuestas (organizationId, x) -> Master(organizationId, id):
   /// aplica a este ledger lo aprendido en Etapa 2.1 -- ningún movimiento
   /// puede referenciar una ubicación, producto, unidad, usuario u otro
   /// movimiento de una organización distinta. Ver "Multi-organización" en
   /// docs/ETAPA-3-MOTOR-INVENTARIO.md.
-  location            Location           @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
-  product              Product            @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
-  entryUnitOfMeasure   UnitOfMeasure      @relation(fields: [organizationId, entryUnitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
-  createdBy            AppUser            @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
-  reversesMovement     InventoryMovement? @relation("MovementReversal", fields: [organizationId, reversesMovementId], references: [organizationId, id], onDelete: Restrict)
-  reversedByMovements  InventoryMovement[] @relation("MovementReversal")
+  location            Location            @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  product             Product             @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  entryUnitOfMeasure  UnitOfMeasure       @relation(fields: [organizationId, entryUnitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
+  createdBy           AppUser             @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+  reversesMovement    InventoryMovement?  @relation("MovementReversal", fields: [organizationId, reversesMovementId], references: [organizationId, id], onDelete: Restrict)
+  reversedByMovements InventoryMovement[] @relation("MovementReversal")
+  /// Presente sólo cuando `movementType = WASTE` y se originó desde la
+  /// pantalla de mermas de Etapa 4 (ver modelo `Waste` más abajo).
+  waste               Waste?
 
   @@unique([organizationId, id])
   /// Idempotencia (sección 14 del prompt): un mismo evento externo (mismo
@@ -567,4 +583,280 @@ model InventoryMovement {
   @@index([organizationId, sourceDocumentType, sourceDocumentId])
   @@index([organizationId, movementType])
   @@map("inventory_movement")
+}
+
+// ---------------------------------------------------------------------------
+// App Heladería Operativa (Etapa 4) — ver docs/ETAPA-4-APP-HELADERIA.md.
+//
+// Consume el ledger de Etapa 3 sin reabrirlo: el conteo, la baja de lata, la
+// merma y el evento de sin-stock generan (o comparan contra) InventoryMovement
+// existentes -- ninguno de los modelos de acá abajo duplica lo que el ledger
+// ya resuelve (RF-009..RF-026, RN-007..RN-033, Doc §15-§20). "Dar de baja
+// lata" en particular NO tiene tabla propia: es un InventoryMovement
+// ICE_CREAM_CONTAINER_CLOSE más (ver `closeIceCreamContainer` en
+// apps/api/src/services/inventory-ledger.ts) -- sección 7 del prompt de
+// Etapa 4 sólo pide los mismos campos que ya tiene cualquier movimiento.
+//
+// Gasto variable NO es parte del ledger de inventario (sección 9 del prompt:
+// "este módulo NO forma parte del ledger de inventario") -- tiene su propia
+// entidad/transacción, sin relación con InventoryMovement.
+
+/// Estado del conteo físico semanal (RF-012/RN-012..018, sección 1 del prompt
+/// de Etapa 4). Nombres tomados literalmente del prompt vigente de Etapa 4 en
+/// vez de los sugeridos en la propuesta conceptual original de Etapa 0
+/// (`RECOUNT_REQUESTED`/`CLOSED`) -- documentado como decisión explícita en
+/// docs/ETAPA-4-APP-HELADERIA.md: `COMPLETED` evita confundirse con el futuro
+/// `weekly_closing.status = CLOSED` (Etapa 6), que es un concepto distinto
+/// (cierre semanal administrativo, fuera de alcance acá).
+///
+/// `DRAFT` se declara por completitud del dominio pero, en esta etapa, NUNCA
+/// se persiste una fila en ese estado: el conteo se arma enteramente en el
+/// dispositivo (IndexedDB, RF-013) y sólo llega al backend ya armado, vía
+/// `POST /api/shop/counts`, que lo crea directamente en `SUBMITTED` y lo hace
+/// avanzar en la misma transacción a `RECOUNT_REQUIRED` o `COMPLETED` según
+/// corresponda -- ver la sección "Autoguardado" de
+/// docs/ETAPA-4-APP-HELADERIA.md sobre por qué no existe un endpoint de
+/// "guardar borrador en el servidor".
+enum InventoryCountStatus {
+  DRAFT
+  SUBMITTED
+  RECOUNT_REQUIRED
+  COMPLETED
+
+  @@map("inventory_count_status")
+}
+
+/// Fracción estimada del contenido de una lata abierta (RF-020/RN-025,
+/// CONFIRMADO textualmente por el cliente: "llena, 3/4, 1/2, 1/4, casi
+/// vacía"). Reemplaza el pesaje real con balanza del sistema anterior
+/// (`Pesajes.gs`) -- explícitamente NO requerido por el documento del
+/// cliente (ver docs/ETAPA-0-ANALISIS-ARQUITECTURA.md, nota sobre pesajes
+/// bajo RF-023). Se reutiliza también en `Waste` cuando una merma se
+/// registra como fracción de una lata en vez de cantidad exacta (sección 8
+/// del prompt: "cantidad O FRACCIÓN").
+enum OpenContainerFraction {
+  FULL
+  THREE_QUARTERS
+  HALF
+  QUARTER
+  NEARLY_EMPTY
+
+  @@map("open_container_fraction")
+}
+
+/// Conteo físico semanal, ciego, por ubicación (RF-012, Doc §15). Un conteo
+/// por (ubicación, semana) -- `weekStart` lo calcula el frontend (el lunes
+/// de la semana en curso, hora local del dispositivo) y se manda explícito,
+/// mismo patrón que `occurredAt` ya usa el ledger desde Etapa 3: no se le
+/// exige al servidor adivinar en qué huso horario "hoy es lunes".
+model InventoryCount {
+  id             String               @id @default(uuid()) @db.Uuid
+  organizationId String               @map("organization_id") @db.Uuid
+  locationId     String               @map("location_id") @db.Uuid
+  weekStart      DateTime             @map("week_start") @db.Date
+  status         InventoryCountStatus @default(SUBMITTED)
+
+  submittedAt DateTime  @default(now()) @map("submitted_at") @db.Timestamptz(6)
+  /// Cuándo el reconteo (si hizo falta) quedó confirmado -- distinto de
+  /// `submittedAt`, que es el envío ORIGINAL (sección 5/6 del prompt:
+  /// conservar la diferencia original, no sólo la final).
+  recountedAt DateTime? @map("recounted_at") @db.Timestamptz(6)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  createdById String @map("created_by") @db.Uuid
+
+  /// Idempotencia del envío original (sección 12 del prompt: "conteos...
+  /// pueden reenviarse después de cortes de conexión"). Obligatoria acá (a
+  /// diferencia de `InventoryMovement.idempotencyKey`, opcional): el origen
+  /// es siempre una PWA con conectividad intermitente, nunca una carga
+  /// manual de escritorio.
+  idempotencyKey         String @map("idempotency_key")
+  idempotencyFingerprint String @map("idempotency_fingerprint")
+
+  organization Organization         @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location     Location             @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  createdBy    AppUser              @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+  items        InventoryCountItem[]
+
+  /// Habilita la FK compuesta (organizationId, countId) desde
+  /// InventoryCountItem.
+  @@unique([organizationId, id])
+  /// A lo sumo un conteo por ubicación y semana (mismo criterio que la
+  /// propuesta conceptual de Etapa 0, sección 10.4, sin el discriminador
+  /// `kind` -- INITIAL_STOCK ya tiene su propio mecanismo en Etapa 3 y no se
+  /// duplica acá).
+  @@unique([organizationId, locationId, weekStart])
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, locationId, weekStart])
+  @@map("inventory_count")
+}
+
+/// Línea de conteo por producto (RF-020, Doc §10.4 `stock_count_line`).
+/// `closedUnits`/`openUnits`/`openFraction` sirven a los DOS modos de
+/// captura de la sección 3/4 del prompt con los mismos tres campos, sin
+/// discriminador de tipo explícito -- exactamente el diseño conceptual ya
+/// confirmado por el cliente en Etapa 0:
+///  - producto cerrado ("2 cajas + 5 unidades"): `closedUnits` = cajas
+///    cerradas, `openUnits` = unidades sueltas (conteo EXACTO), `openFraction`
+///    siempre NULL (no se estima a ojo un conteo cerrado).
+///  - sabor a granel: `closedUnits` = latas cerradas, `openUnits` = latas
+///    ABIERTAS, `openFraction` = fracción estimada del contenido de esas
+///    latas abiertas (obligatoria cuando `openUnits > 0`).
+model InventoryCountItem {
+  id             String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  countId        String @map("count_id") @db.Uuid
+  productId      String @map("product_id") @db.Uuid
+
+  /// CHECK >= 0 y CHECK (openFraction IS NULL OR openUnits > 0) agregados a
+  /// mano en la migración (Prisma no expresa CHECK declarativamente) --
+  /// mismo patrón que los CHECK de `InventoryMovement`.
+  closedUnits  Int?                   @map("closed_units")
+  openUnits    Int?                   @map("open_units")
+  openFraction OpenContainerFraction? @map("open_fraction")
+
+  /// Cantidad física, normalizada a la unidad canónica del producto (mismo
+  /// concepto que `InventoryMovement.quantity`) -- calculada UNA VEZ por el
+  /// backend a partir de `closedUnits`/`openUnits`/`openFraction` y
+  /// `Product.unitsPerHandlingUnit`, nunca por el frontend (sección 3 del
+  /// prompt: "la empleada no debe hacer multiplicaciones").
+  physicalQuantity Decimal @map("physical_quantity") @db.Decimal(14, 3)
+
+  /// Completado por el backend DESPUÉS de guardar el conteo (conteo ciego,
+  /// RN-012) -- nunca antes. NULL hasta ese momento, nunca expuesto al
+  /// empleado mientras cuenta (sección 1 del prompt).
+  theoreticalQuantity Decimal? @map("theoretical_quantity") @db.Decimal(14, 3)
+  /// = physicalQuantity - theoreticalQuantity (sección 6 del prompt, RN-016).
+  /// Se conserva para siempre, incluso si en una etapa futura un ADMIN la
+  /// justifica y corrige el ledger -- nunca se sobrescribe.
+  difference          Decimal? @db.Decimal(14, 3)
+
+  /// true si `|difference|` superó el umbral configurado para la categoría
+  /// de este producto (sección 5 del prompt) -- ver
+  /// docs/ETAPA-4-APP-HELADERIA.md, "Reconteo inteligente", sobre los
+  /// umbrales (NINGÚN valor está inventado; sin configurar, nunca se marca).
+  needsRecount Boolean @default(false) @map("needs_recount")
+  /// true una vez que este ítem específico ya pasó por su segundo conteo
+  /// (sección 5: "solicitar SEGUNDO conteo" -- una sola ronda adicional, no
+  /// un loop; ver decisión documentada en docs/ETAPA-4-APP-HELADERIA.md).
+  recounted    Boolean @default(false)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  count        InventoryCount @relation(fields: [organizationId, countId], references: [organizationId, id], onDelete: Restrict)
+  product      Product        @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+
+  /// Un producto aparece una única vez por conteo.
+  @@unique([countId, productId])
+  @@index([organizationId, countId])
+  @@map("inventory_count_item")
+}
+
+/// Merma con foto (RF-024/025, RN-029..032). Deliberadamente NO duplica
+/// `quantity`/`reason`/`locationId`/`productId`/`occurredAt`/`createdById`:
+/// esos ya están en el `InventoryMovement` WASTE que la merma genera --
+/// `movementId` los referencia. Sólo agrega lo que el ledger no tiene: la
+/// foto (RN-029: obligatoria) y la idempotencia propia del alta desde la PWA.
+///
+/// "Costo perdido" / "valor de venta perdido" por separado (RN-032) queda
+/// PENDIENTE: depende de costo/precio vigente por producto, que el catálogo
+/// de Etapa 2 explícitamente no modela todavía (RF-039, P3, fuera del Hito
+/// 1) -- ver docs/ETAPA-4-APP-HELADERIA.md, "Pendientes".
+model Waste {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  /// Movimiento WASTE generado en la misma transacción -- ver
+  /// `createWaste` en apps/api/src/services/inventory-ledger.ts. La
+  /// idempotencia de la merma NO se duplica acá: es la del propio
+  /// `InventoryMovement` (`idempotencyKey`/`idempotencyFingerprint`, ya
+  /// existentes desde Etapa 3) la que decide si el alta es un retry
+  /// legítimo o un conflicto -- exactamente el mismo mecanismo que
+  /// INITIAL_STOCK/ADJUSTMENT, sin inventar uno paralelo.
+  movementId     String   @map("movement_id") @db.Uuid
+  /// Ruta dentro de Supabase Storage (bucket privado), NUNCA una URL pública
+  /// ni base64 en la base de datos (sección 8 del prompt) -- ver
+  /// docs/ETAPA-4-APP-HELADERIA.md, "Storage".
+  photoPath      String   @map("photo_path")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  movement     InventoryMovement @relation(fields: [organizationId, movementId], references: [organizationId, id], onDelete: Restrict)
+
+  @@unique([organizationId, movementId])
+  @@map("waste")
+}
+
+/// Gasto variable de una heladería (RF-026/RN-033). Entidad propia, sin
+/// relación con el ledger de inventario (sección 9 del prompt) ni con caja
+/// (Etapa 7, fuera de alcance). `category` es texto libre configurable, no
+/// un catálogo cerrado -- ningún catálogo de categorías está CONFIRMADO
+/// todavía (sección 9 del prompt: "no inventar categorías obligatorias").
+/// `receiptPath` es nullable a propósito: RN-033 dice literalmente
+/// "comprobante (si existe)", no obligatorio.
+model VariableExpense {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  locationId     String   @map("location_id") @db.Uuid
+  amount         Decimal  @db.Decimal(12, 2)
+  category       String
+  description    String
+  /// Ruta en Supabase Storage (bucket privado) -- ver `Waste.photoPath`.
+  receiptPath    String?  @map("receipt_path")
+  occurredAt     DateTime @map("occurred_at") @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdById    String   @map("created_by") @db.Uuid
+
+  idempotencyKey         String @map("idempotency_key")
+  idempotencyFingerprint String @map("idempotency_fingerprint")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location     Location     @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  createdBy    AppUser      @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, locationId, occurredAt])
+  @@map("variable_expense")
+}
+
+/// Clasificación de un evento "sin stock" (RF-019/RN-019, CONFIRMADO
+/// textualmente: "reposición urgente posible" / "faltante de
+/// abastecimiento"). Nombres tomados de la propuesta conceptual de Etapa 0
+/// (`URGENT_RESTOCK`/`SUPPLY_SHORTAGE`), sección 10.5.
+enum StockoutClassification {
+  URGENT_RESTOCK
+  SUPPLY_SHORTAGE
+
+  @@map("stockout_classification")
+}
+
+/// Evento "sin stock" (RF-019/RN-019). NO es un movimiento de inventario --
+/// no modifica stock, no crea stock artificial, no bloquea nada por saldo
+/// negativo (sección 10 del prompt). `classification` se calcula, cuando es
+/// posible, leyendo el stock YA EXISTENTE de las ubicaciones tipo DEPOT de
+/// la organización (mismo cálculo de `getStockBalances`, sin ninguna
+/// funcionalidad de depósito nueva) -- NULL si no hay ninguna ubicación
+/// DEPOT configurada, en vez de inventar una clasificación por defecto.
+model StockoutEvent {
+  id             String                  @id @default(uuid()) @db.Uuid
+  organizationId String                  @map("organization_id") @db.Uuid
+  locationId     String                  @map("location_id") @db.Uuid
+  productId      String                  @map("product_id") @db.Uuid
+  classification StockoutClassification?
+  occurredAt     DateTime                @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  createdById    String                  @map("created_by") @db.Uuid
+
+  idempotencyKey         String @map("idempotency_key")
+  idempotencyFingerprint String @map("idempotency_fingerprint")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location     Location     @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  product      Product      @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  createdBy    AppUser      @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, locationId, occurredAt])
+  @@map("stockout_event")
 }

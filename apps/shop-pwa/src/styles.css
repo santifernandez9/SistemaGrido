@@ -141,3 +141,108 @@ button:disabled {
   border-radius: 999px;
   margin: 4px 0 12px;
 }
+
+/* Etapa 4: home operativa con botones grandes de acceso a cada acción
+   (sección 14 del prompt: "sin tablas de escritorio ni formularios largos"). */
+.action-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.big-button {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: #fff;
+  color: #0b1d33;
+  border: 1px solid #d8dde5;
+  border-radius: 14px;
+  padding: 28px 12px;
+  min-height: 110px;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+.big-button-icon {
+  font-size: 32px;
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.page h1 {
+  margin-bottom: 0;
+}
+
+.page label {
+  font-size: 13px;
+  font-weight: 600;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.count-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+}
+
+.count-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.count-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.count-fields label {
+  grid-column: span 1;
+}
+
+.mode-fieldset {
+  display: flex;
+  gap: 16px;
+  border: none;
+  padding: 0;
+  margin: 0;
+  font-size: 14px;
+}
+
+.mode-fieldset label {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  font-weight: normal;
+}
+
+.submit-bar {
+  position: sticky;
+  bottom: 0;
+  background: #f5f6f8;
+  padding: 12px 0;
+}

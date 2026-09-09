@@ -24,6 +24,15 @@ vi.mock('@sistema-grido/auth-client', () => ({
   ApiClientError: class ApiClientError extends Error {},
 }));
 
+// App.tsx importa (estáticamente) todas las pantallas operativas de Etapa 4,
+// incluidas las que suben archivos (Merma/Gasto) -- esas pasan por
+// `../lib/uploadAttachment.js`, que a su vez importa el cliente real de
+// Supabase (`./lib/supabase.js`), creado en el momento del import y
+// dependiente de variables de entorno reales. Se corta esa cadena acá para
+// que este test (que sólo ejercita el ruteo/shell, no la subida de
+// archivos) no necesite ese entorno.
+vi.mock('./lib/supabase.js', () => ({ supabase: {}, apiBaseUrl: 'http://test.local' }));
+
 vi.mock('virtual:pwa-register/react', () => ({
   useRegisterSW: () => ({
     needRefresh: [false, vi.fn()],
@@ -70,5 +79,16 @@ describe('App (shop-pwa) — routing base', () => {
     expect(screen.getByText(/Empleada de heladería/)).toBeInTheDocument();
     // Aparece dos veces: en el header (Layout) y en el badge de sucursal (HomePage).
     expect(screen.getAllByText(/Heladería Demo 1/).length).toBeGreaterThan(0);
+
+    // Home operativa de Etapa 4 (sección 14 del prompt): un botón grande de
+    // acceso a cada una de las 5 capacidades, ni una más.
+    expect(screen.getByRole('link', { name: /conteo/i })).toHaveAttribute('href', '/conteo');
+    expect(screen.getByRole('link', { name: /merma/i })).toHaveAttribute('href', '/merma');
+    expect(screen.getByRole('link', { name: /baja de lata/i })).toHaveAttribute(
+      'href',
+      '/baja-lata',
+    );
+    expect(screen.getByRole('link', { name: /gasto/i })).toHaveAttribute('href', '/gasto');
+    expect(screen.getByRole('link', { name: /sin stock/i })).toHaveAttribute('href', '/sin-stock');
   });
 });

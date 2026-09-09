@@ -9,9 +9,13 @@ declare module 'fastify' {
       /** Cliente con anon key: se usa sólo para validar el JWT de una request (auth.getUser). */
       auth: SupabaseClient;
       /**
-       * Cliente con service role key: SOLO para la Admin API de Supabase Auth (invitar/
-       * desactivar personas). Nunca se usa para leer/escribir datos de negocio -- eso
-       * siempre pasa por Prisma, con las reglas de autorización de esta API.
+       * Cliente con service role key. Dos usos, ambos de infraestructura, nunca datos
+       * de negocio (eso siempre pasa por Prisma, con las reglas de autorización de
+       * esta API): la Admin API de Supabase Auth (invitar/desactivar personas), y
+       * desde Etapa 4, Supabase Storage (`admin.storage.from(bucket)...`) para firmar
+       * URLs de subida/lectura de fotos de merma y comprobantes de gasto -- un bucket
+       * privado, sin política pública, donde sólo el backend puede generar accesos
+       * temporales (ver apps/api/src/services/attachments.ts).
        */
       admin: SupabaseClient;
     };

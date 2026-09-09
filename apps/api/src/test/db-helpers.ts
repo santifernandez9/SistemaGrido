@@ -7,6 +7,11 @@ import { prisma } from '@sistema-grido/db';
  * base de datos de test (ver docs/ETAPA-1-BASE-CORE.md, sección "Tests").
  */
 export async function resetCoreTables(): Promise<void> {
+  await prisma.inventoryCountItem.deleteMany();
+  await prisma.inventoryCount.deleteMany();
+  await prisma.waste.deleteMany();
+  await prisma.variableExpense.deleteMany();
+  await prisma.stockoutEvent.deleteMany();
   await prisma.inventoryMovement.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();

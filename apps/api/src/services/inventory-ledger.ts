@@ -1,15 +1,21 @@
 import type { FastifyInstance } from 'fastify';
 import { Prisma } from '@sistema-grido/db';
 import type {
+  CloseIceCreamContainerInput,
   CreateAdjustmentInput,
   CreateInitialStockInput,
+  CreateWasteInput as CreateWasteInputDto,
   InventoryMovement,
   MovementFilters,
   MovementType,
   Page,
   PageInput,
   StockBalance,
+  Waste as WasteDto,
 } from '@sistema-grido/shared-types';
+import { openContainerFractionMultiplier } from './bulk-flavor.js';
+import { isUniqueConstraintError, isUniqueConstraintViolationOn } from './idempotency.js';
+import { createReadUrl } from './attachments.js';
 import type { CurrentUser } from '../plugins/auth.js';
 import { ConflictError, NotFoundError, ValidationError } from '../errors.js';
 
@@ -23,36 +29,6 @@ import { ConflictError, NotFoundError, ValidationError } from '../errors.js';
  * movimiento+auditoría (sección 18 del prompt de Etapa 3) y las
  * validaciones de dominio.
  */
-
-function isUniqueConstraintError(err: unknown): boolean {
-  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002';
-}
-
-/**
- * Etapa 3.2, corrección de "concurrencia en idempotencia". Un mismo INSERT de
- * `InventoryMovement` puede violar MÁS DE UN índice único a la vez posible
- * (idempotencyKey, o el índice parcial de stock inicial) -- capturar
- * cualquier P2002 y asumir siempre la misma causa (como hacía Etapa 3.1) es
- * exactamente el bug que señaló la auditoría: una colisión de
- * `idempotencyKey` podía terminar reportada como "ya existe un stock
- * inicial", o un P2002 genérico. `err.meta.target` de Prisma trae las
- * columnas EXACTAS del índice/constraint que realmente disparó el error
- * (incluso para los índices parciales agregados a mano en migraciones SQL,
- * que Prisma no conoce por el schema declarativo) -- comparar contra esas
- * columnas, nunca contra el código de error solo, es lo que permite
- * distinguir con certeza cuál constraint fue.
- */
-function isUniqueConstraintViolationOn(err: unknown, targetColumns: readonly string[]): boolean {
-  if (!(err instanceof Prisma.PrismaClientKnownRequestError) || err.code !== 'P2002') {
-    return false;
-  }
-  const target = err.meta?.target;
-  if (!Array.isArray(target)) return false;
-  return (
-    target.length === targetColumns.length &&
-    targetColumns.every((column) => target.includes(column))
-  );
-}
 
 /** Columnas reales (snake_case) del `@@unique([organizationId, idempotencyKey])`. */
 const IDEMPOTENCY_KEY_UNIQUE_TARGET = ['organization_id', 'idempotency_key'] as const;
@@ -102,8 +78,11 @@ function mapMovement(row: MovementRow): InventoryMovement {
 
 /** Ubicación válida para recibir un movimiento: existe en la organización y está activa
  * (RN-004: un maestro inactivo "no aparece para nuevas cargas pero conserva su historial" --
- * mismo criterio ya aplicado a Category/Product en Etapa 2, extendido acá a Location). */
-async function assertLocationForMovement(
+ * mismo criterio ya aplicado a Category/Product en Etapa 2, extendido acá a Location).
+ * Exportada desde Etapa 4: los servicios nuevos (conteo, gasto variable, sin
+ * stock -- apps/api/src/services/inventory-count.ts, variable-expense.ts,
+ * stockout.ts) la reutilizan en vez de duplicar la misma validación. */
+export async function assertLocationForMovement(
   fastify: FastifyInstance,
   organizationId: string,
   locationId: string,
@@ -120,7 +99,7 @@ async function assertLocationForMovement(
   return location;
 }
 
-async function assertProductForMovement(
+export async function assertProductForMovement(
   fastify: FastifyInstance,
   organizationId: string,
   productId: string,
@@ -714,4 +693,297 @@ export async function reverseMovement(
     }
     throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Etapa 4 (App Heladería Operativa) — ver docs/ETAPA-4-APP-HELADERIA.md.
+//
+// "Dar de baja lata" y "merma" son, ante todo, movimientos del ledger
+// (ICE_CREAM_CONTAINER_CLOSE / WASTE, ambos RESERVADOS desde Etapa 3) --
+// siguen viviendo acá, la única puerta de escritura de InventoryMovement,
+// en vez de en un servicio aparte que duplique la validación/idempotencia
+// ya resuelta arriba.
+
+/**
+ * Baja normal de lata (RF-021/RN-027): "dar de baja" un sabor consume UNA
+ * unidad de manejo completa (una lata), siempre -- no se le pide cantidad
+ * al empleado (sección 7 del prompt: "muy pocos toques"), y no exige motivo
+ * (a diferencia de ADJUSTMENT) porque representa consumo normal, no una
+ * corrección -- "no pedir observaciones obligatorias para una baja normal".
+ * Sólo aplica a productos con `flavorId` (un sabor de helado, RF-003):
+ * "dar de baja lata" no tiene sentido para un insumo o packaging.
+ */
+export async function closeIceCreamContainer(
+  fastify: FastifyInstance,
+  organizationId: string,
+  actor: CurrentUser,
+  input: CloseIceCreamContainerInput,
+): Promise<InventoryMovement> {
+  const fingerprint = computeIdempotencyFingerprint({
+    movementType: 'ICE_CREAM_CONTAINER_CLOSE',
+    locationId: input.locationId,
+    productId: input.productId,
+    enteredQuantity: new Prisma.Decimal(-1),
+  });
+  const idempotent = await resolveIdempotency(
+    fastify,
+    organizationId,
+    input.idempotencyKey,
+    fingerprint,
+  );
+  if (idempotent) return idempotent;
+
+  await assertLocationForMovement(fastify, organizationId, input.locationId);
+  const product = await assertProductForMovement(fastify, organizationId, input.productId);
+  if (!product.flavorId) {
+    throw new ValidationError(
+      'Sólo se puede dar de baja una lata de un producto que sea un sabor de helado',
+    );
+  }
+
+  const enteredQuantity = new Prisma.Decimal(-1);
+  const conversionFactor = product.unitsPerHandlingUnit;
+  const quantity = enteredQuantity.mul(conversionFactor);
+
+  try {
+    return await fastify.db.$transaction(async (tx) => {
+      const created = await tx.inventoryMovement.create({
+        data: {
+          organizationId,
+          locationId: input.locationId,
+          productId: input.productId,
+          movementType: 'ICE_CREAM_CONTAINER_CLOSE',
+          quantity,
+          enteredQuantity,
+          entryUnitOfMeasureId: product.unitOfMeasureId,
+          conversionFactor,
+          idempotencyKey: input.idempotencyKey,
+          idempotencyFingerprint: fingerprint,
+          createdById: actor.id,
+        },
+        include: movementInclude,
+      });
+
+      await fastify.audit.logTx(tx, {
+        organizationId,
+        userId: actor.id,
+        roleCode: actor.roleCode,
+        action: 'SHOP_ICE_CREAM_CONTAINER_CLOSED',
+        module: 'SHOP_OPS',
+        entityType: 'inventory_movement',
+        entityId: created.id,
+        afterValue: mapMovement(created),
+      });
+
+      return mapMovement(created);
+    });
+  } catch (err) {
+    if (isUniqueConstraintViolationOn(err, IDEMPOTENCY_KEY_UNIQUE_TARGET)) {
+      return resolveIdempotencyConflictAfterRace(
+        fastify,
+        organizationId,
+        input.idempotencyKey,
+        fingerprint,
+      );
+    }
+    throw err;
+  }
+}
+
+const wasteInclude = {
+  movement: { include: movementInclude },
+} satisfies Prisma.WasteInclude;
+
+type WasteRow = Prisma.WasteGetPayload<{ include: typeof wasteInclude }>;
+
+function mapWaste(row: WasteRow, photoUrl: string | null): WasteDto {
+  const movement = mapMovement(row.movement);
+  return {
+    id: row.id,
+    organizationId: row.organizationId,
+    locationId: movement.locationId,
+    locationName: movement.locationName,
+    productId: movement.productId,
+    productName: movement.productName,
+    // La cantidad de la merma se muestra siempre positiva (lo que se tiró),
+    // aunque el movimiento del ledger la registre negativa (una salida).
+    quantity: movement.enteredQuantity.startsWith('-')
+      ? movement.enteredQuantity.slice(1)
+      : movement.enteredQuantity,
+    reason: movement.reason ?? '',
+    photoPath: row.photoPath,
+    photoUrl,
+    createdById: movement.createdById,
+    createdByName: movement.createdByName,
+    occurredAt: movement.occurredAt,
+    createdAt: row.createdAt.toISOString(),
+  };
+}
+
+/**
+ * Merma con foto (RF-024/025/RN-029..032). Genera un movimiento WASTE (ya
+ * RESERVADO desde Etapa 3) y, en la MISMA transacción, la fila `Waste` que
+ * sólo agrega lo que el movimiento no tiene: la foto (obligatoria, RN-029).
+ * La cantidad se acepta como cantidad exacta O como fracción de una lata
+ * abierta (sección 8 del prompt: "cantidad o fracción") -- nunca ambas; la
+ * fracción sólo tiene sentido para un sabor de helado (`flavorId`).
+ */
+export async function createWaste(
+  fastify: FastifyInstance,
+  organizationId: string,
+  actor: CurrentUser,
+  input: CreateWasteInputDto,
+): Promise<WasteDto> {
+  const reason = input.reason?.trim();
+  if (!reason) {
+    throw new ValidationError('La merma requiere un motivo');
+  }
+  const photoPath = input.photoPath?.trim();
+  if (!photoPath) {
+    throw new ValidationError('La merma requiere una foto');
+  }
+
+  await assertLocationForMovement(fastify, organizationId, input.locationId);
+  const product = await assertProductForMovement(fastify, organizationId, input.productId);
+
+  let enteredQuantityMagnitude: Prisma.Decimal;
+  if (input.enteredQuantity !== undefined) {
+    enteredQuantityMagnitude = new Prisma.Decimal(input.enteredQuantity);
+    if (enteredQuantityMagnitude.lte(0)) {
+      throw new ValidationError('La cantidad de la merma debe ser mayor a cero');
+    }
+  } else if (input.fraction !== undefined) {
+    if (!product.flavorId) {
+      throw new ValidationError(
+        'Sólo se puede registrar una merma como fracción de lata para un sabor de helado',
+      );
+    }
+    enteredQuantityMagnitude = openContainerFractionMultiplier(fastify, input.fraction);
+  } else {
+    throw new ValidationError('Debe indicarse una cantidad o una fracción para la merma');
+  }
+
+  // WASTE siempre resta -- la magnitud ingresada (positiva, "lo que se tiró")
+  // se registra en el ledger con signo negativo, mismo criterio que RN-010.
+  const enteredQuantity = enteredQuantityMagnitude.negated();
+  const conversionFactor = product.unitsPerHandlingUnit;
+  const quantity = enteredQuantity.mul(conversionFactor);
+
+  const fingerprint = computeIdempotencyFingerprint({
+    movementType: 'WASTE',
+    locationId: input.locationId,
+    productId: input.productId,
+    enteredQuantity,
+    reason,
+    occurredAt: input.occurredAt ?? null,
+  });
+
+  const idempotentMovement = await resolveIdempotency(
+    fastify,
+    organizationId,
+    input.idempotencyKey,
+    fingerprint,
+  );
+  if (idempotentMovement) {
+    return loadWasteForMovement(fastify, organizationId, idempotentMovement.id);
+  }
+
+  try {
+    return await fastify.db.$transaction(async (tx) => {
+      const movement = await tx.inventoryMovement.create({
+        data: {
+          organizationId,
+          locationId: input.locationId,
+          productId: input.productId,
+          movementType: 'WASTE',
+          quantity,
+          enteredQuantity,
+          entryUnitOfMeasureId: product.unitOfMeasureId,
+          conversionFactor,
+          reason,
+          occurredAt: input.occurredAt ? new Date(input.occurredAt) : undefined,
+          idempotencyKey: input.idempotencyKey,
+          idempotencyFingerprint: fingerprint,
+          createdById: actor.id,
+        },
+      });
+
+      const waste = await tx.waste.create({
+        data: { organizationId, movementId: movement.id, photoPath },
+        include: wasteInclude,
+      });
+
+      await fastify.audit.logTx(tx, {
+        organizationId,
+        userId: actor.id,
+        roleCode: actor.roleCode,
+        action: 'SHOP_WASTE_CREATED',
+        module: 'SHOP_OPS',
+        entityType: 'waste',
+        entityId: waste.id,
+        afterValue: mapWaste(waste, null),
+        reason,
+      });
+
+      return mapWaste(waste, null);
+    });
+  } catch (err) {
+    if (isUniqueConstraintViolationOn(err, IDEMPOTENCY_KEY_UNIQUE_TARGET)) {
+      const winner = await resolveIdempotencyConflictAfterRace(
+        fastify,
+        organizationId,
+        input.idempotencyKey,
+        fingerprint,
+      );
+      return loadWasteForMovement(fastify, organizationId, winner.id);
+    }
+    throw err;
+  }
+}
+
+async function loadWasteForMovement(
+  fastify: FastifyInstance,
+  organizationId: string,
+  movementId: string,
+): Promise<WasteDto> {
+  const waste = await fastify.db.waste.findFirst({
+    where: { organizationId, movementId },
+    include: wasteInclude,
+  });
+  if (!waste) {
+    // No debería poder pasar: el UNIQUE de idempotencyKey que disparó esta
+    // reconsulta es del propio InventoryMovement WASTE, y `waste` siempre se
+    // crea en la MISMA transacción que ese movimiento -- ver el catch de
+    // arriba. Se registra igual, en vez de devolver un error genérico sin
+    // contexto (mismo criterio que `resolveIdempotencyConflictAfterRace`).
+    fastify.log.error(
+      { organizationId, movementId },
+      'Etapa 4: movimiento WASTE idempotente sin fila Waste asociada (condición inesperada)',
+    );
+    throw new ConflictError(
+      'No se pudo confirmar el resultado de esta merma por una condición inesperada; reintentá la solicitud.',
+    );
+  }
+  return mapWaste(waste, null);
+}
+
+/** Listado de mermas para revisión de Admin (sección 15 del prompt de
+ * Etapa 4: "vistas mínimas necesarias para revisar... mermas"). La foto se
+ * expone como URL firmada de corta duración, calculada en cada respuesta. */
+export async function listWaste(
+  fastify: FastifyInstance,
+  organizationId: string,
+  filters: { locationId?: string },
+): Promise<WasteDto[]> {
+  const rows = await fastify.db.waste.findMany({
+    where: {
+      organizationId,
+      ...(filters.locationId ? { movement: { locationId: filters.locationId } } : {}),
+    },
+    include: wasteInclude,
+    orderBy: { createdAt: 'desc' },
+  });
+  return Promise.all(
+    rows.map(async (row) => mapWaste(row, await createReadUrl(fastify, row.photoPath))),
+  );
 }

@@ -30,14 +30,23 @@ const updateProductSchema = z
   });
 
 /**
- * Catálogo de productos (RF-001, Etapa 2 sección 4). Sólo ADMIN. Ninguna ruta de
- * este archivo toca stock/inventario -- ver docs/ETAPA-2-CATALOGO-MAESTROS.md,
- * sección "Qué NO se implementó".
+ * Catálogo de productos (RF-001, Etapa 2 sección 4). Alta/edición: sólo
+ * ADMIN -- gestionar el catálogo sigue sin habilitarse para el resto de los
+ * roles (sección 11 del prompt de Etapa 4). Lectura (GET): también
+ * SHOP_EMPLOYEE/DEPOSIT_MANAGER desde Etapa 4 -- la App Heladería necesita
+ * poder elegir un producto para contar/dar de baja/registrar merma/marcar
+ * sin stock, lo que exige poder LEER el catálogo (ver
+ * docs/ETAPA-4-APP-HELADERIA.md, "Permisos"); eso no es "gestionar
+ * catálogo" (crear/editar productos sigue siendo exclusivo de ADMIN).
+ * Ninguna ruta de este archivo toca stock/inventario -- ver
+ * docs/ETAPA-2-CATALOGO-MAESTROS.md, sección "Qué NO se implementó".
  */
 export default async function productsRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.get(
     '/api/products',
-    { preHandler: [fastify.authenticate, requireRole('ADMIN')] },
+    {
+      preHandler: [fastify.authenticate, requireRole('ADMIN', 'SHOP_EMPLOYEE', 'DEPOSIT_MANAGER')],
+    },
     async (request) => {
       const body: ApiSuccess<Product[]> = {
         ok: true,
@@ -49,7 +58,9 @@ export default async function productsRoutes(fastify: FastifyInstance): Promise<
 
   fastify.get(
     '/api/products/:id',
-    { preHandler: [fastify.authenticate, requireRole('ADMIN')] },
+    {
+      preHandler: [fastify.authenticate, requireRole('ADMIN', 'SHOP_EMPLOYEE', 'DEPOSIT_MANAGER')],
+    },
     async (request) => {
       const params = z.object({ id: z.string().uuid() }).parse(request.params);
       const body: ApiSuccess<Product> = {
