@@ -67,3 +67,17 @@ export class InternalError extends AppError {
     super(message);
   }
 }
+
+/**
+ * La operación pedida es válida, pero el backend no tiene la configuración
+ * necesaria para completarla (ej. una fracción "casi vacía" sin un valor
+ * numérico confirmado por el cliente -- Etapa 4.1, sección 1). Distinto de
+ * ValidationError (el dato que mandó el cliente sí es válido) y de
+ * InternalError (no es un bug ni un error inesperado: es un rechazo
+ * controlado y explícito, con mensaje siempre visible al cliente incluso en
+ * producción, hasta que se complete la configuración pendiente).
+ */
+export class ConfigurationError extends AppError {
+  readonly code = 'CONFIGURATION_ERROR' as const;
+  readonly statusCode = 503;
+}

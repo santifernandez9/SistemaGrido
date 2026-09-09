@@ -32,6 +32,7 @@ import { isUniqueConstraintViolationOn } from './idempotency.js';
 
 const COUNT_IDEMPOTENCY_KEY_TARGET = ['organization_id', 'idempotency_key'] as const;
 const COUNT_LOCATION_WEEK_TARGET = ['organization_id', 'location_id', 'week_start'] as const;
+const RECOUNT_IDEMPOTENCY_KEY_TARGET = ['organization_id', 'recount_idempotency_key'] as const;
 
 const countInclude = {
   location: { select: { name: true } },
@@ -105,6 +106,19 @@ function computeCountFingerprint(payload: {
   });
 }
 
+/**
+ * Identidad semántica del RECONTEO (Etapa 4.1, sección 3) -- distinta de
+ * `computeCountFingerprint` de arriba (esa es del envío ORIGINAL, una
+ * operación diferente; nunca se reutiliza ambiguamente). Incluye
+ * `countId` porque el reconteo está atado a un conteo puntual: los mismos
+ * valores enviados para dos conteos distintos NO son "la misma operación".
+ * `canonicalItemsForFingerprint` ya ordena por `productId`, así que el
+ * orden del array de entrada no afecta el resultado.
+ */
+function computeRecountFingerprint(countId: string, items: InventoryCountDraftItem[]): string {
+  return JSON.stringify({ countId, items: canonicalItemsForFingerprint(items) });
+}
+
 async function resolveCountIdempotency(
   fastify: FastifyInstance,
   organizationId: string,
@@ -149,6 +163,45 @@ async function resolveCountIdempotencyConflictAfterRace(
   throw new ConflictError(
     'Esta clave de idempotencia ya se usó para enviar un conteo distinto; no puede reutilizarse.',
   );
+}
+
+/**
+ * Resolución explícita de carrera del RECONTEO (Etapa 4.1, sección 4):
+ * Postgres (el UPDATE condicional + este índice único) sigue siendo la
+ * única fuente de verdad -- acá sólo se reconsulta lo que YA quedó
+ * persistido para decidir si el request que perdió la carrera (o un
+ * P2002 real por reutilizar la clave en otro conteo) representa la MISMA
+ * operación (mismo `countId` + misma clave + mismo fingerprint -> éxito
+ * idempotente) o una incompatible (-> 409). Nunca locks/mutex/sleeps: sólo
+ * una lectura después del hecho.
+ */
+async function resolveRecountConflictAfterRace(
+  fastify: FastifyInstance,
+  organizationId: string,
+  countId: string,
+  idempotencyKey: string,
+  fingerprint: string,
+): Promise<InventoryCountDto> {
+  const winner = await fastify.db.inventoryCount.findFirst({
+    where: { id: countId, organizationId },
+    include: countInclude,
+  });
+  if (!winner) {
+    fastify.log.error(
+      { organizationId, countId, idempotencyKey },
+      'Etapa 4.1: colisión de idempotencia de reconteo sin conteo encontrado al reconsultar',
+    );
+    throw new ConflictError(
+      'No se pudo confirmar el resultado de este reconteo por una condición de carrera inesperada; reintentá la solicitud.',
+    );
+  }
+  if (
+    winner.recountIdempotencyKey === idempotencyKey &&
+    winner.recountIdempotencyFingerprint === fingerprint
+  ) {
+    return mapCount(winner);
+  }
+  throw new ConflictError('Este conteo ya fue completado con un reconteo distinto.');
 }
 
 function parseWeekStart(weekStart: string): Date {
@@ -363,22 +416,32 @@ export async function submitInventoryCount(
   }
 }
 
-function itemMatchesResubmission(row: CountItemRow, item: InventoryCountDraftItem): boolean {
-  return (
-    row.closedUnits === (item.closedUnits ?? null) &&
-    row.openUnits === (item.openUnits ?? null) &&
-    row.openFraction === (item.openFraction ?? null)
-  );
-}
-
 /**
- * Reconteo (sección 5 del prompt): un único reenvío adicional para los
- * ítems marcados `needsRecount` -- "solicitar SEGUNDO conteo", no un loop.
- * Idempotencia por VALOR (no por clave propia): dado que esta operación
- * está atada a un `InventoryCount` ya identificado por `countId`, un
- * reenvío se reconoce comparando los valores contra lo que ya quedó
- * guardado, en vez de agregar un segundo par de columnas de idempotencia
- * (ver docs/ETAPA-4-APP-HELADERIA.md, "Idempotencia").
+ * Reconteo (sección 5 del prompt original): un único reenvío adicional
+ * para los ítems marcados `needsRecount` -- "solicitar SEGUNDO conteo", no
+ * un loop.
+ *
+ * Idempotencia (Etapa 4.1, secciones 2/3/4 del hardening): clave +
+ * fingerprint propios (`InventoryCount.recountIdempotencyKey`/
+ * `recountIdempotencyFingerprint`, columnas separadas de las del envío
+ * ORIGINAL del conteo -- nunca se reutiliza ambiguamente una clave para dos
+ * operaciones distintas), con el mismo criterio de Etapa 3.1/3.2: la
+ * identidad semántica del reconteo es `countId` + los productos
+ * recontados + los valores físicos enviados, canonicalizados para que el
+ * orden del array no la altere (`computeRecountFingerprint`).
+ *
+ * Concurrencia: Postgres sigue siendo la única fuente de verdad. El UPDATE
+ * condicional (`status: RECOUNT_REQUIRED -> COMPLETED`) serializa a los
+ * requests concurrentes vía el lock de fila que Postgres ya toma en el
+ * propio UPDATE (mismo mecanismo que `reverseMovement`, Etapa 3.1,
+ * Problema 1) -- nunca un lock en memoria ni un mutex por proceso, así que
+ * funciona igual con una o con varias instancias del backend. El request
+ * que "pierde" la carrera (`updateResult.count === 0`) nunca asume que es
+ * un conflicto: reconsulta lo que quedó persistido
+ * (`resolveRecountConflictAfterRace`) y sólo si NO coincide con su propia
+ * clave+fingerprint responde 409 -- si coincide, es el mismo retry y
+ * devuelve el mismo resultado exitoso que el ganador, sin volver a auditar
+ * ni a escribir nada.
  */
 export async function submitInventoryRecount(
   fastify: FastifyInstance,
@@ -408,15 +471,24 @@ export async function submitInventoryRecount(
     }
   }
 
-  if (count.status === 'COMPLETED') {
-    // Posible retry legítimo del mismo reconteo -- compara valores, no una clave.
-    const currentByProduct = new Map(count.items.map((i) => [i.productId, i]));
-    const identical = input.items.every((item) => {
-      const row = currentByProduct.get(item.productId);
-      return row && row.recounted && itemMatchesResubmission(row, item);
-    });
-    if (identical) return mapCount(count);
-    throw new ConflictError('Este conteo ya fue completado con valores de reconteo distintos.');
+  const fingerprint = computeRecountFingerprint(countId, input.items);
+
+  // Idempotencia primaria: esta MISMA clave ya se usó para el reconteo de
+  // ESTE conteo -- cubre tanto el retry secuencial (después de COMPLETED)
+  // como el caso en el que este request perdió una carrera concurrente
+  // contra sí mismo (mismo cliente, mismo idempotencyKey persistido).
+  if (count.recountIdempotencyKey !== null) {
+    if (
+      count.recountIdempotencyKey === input.idempotencyKey &&
+      count.recountIdempotencyFingerprint === fingerprint
+    ) {
+      return mapCount(count);
+    }
+    throw new ConflictError(
+      count.recountIdempotencyKey === input.idempotencyKey
+        ? 'Esta clave de idempotencia ya se usó para un reconteo distinto de este conteo; no puede reutilizarse.'
+        : 'Este conteo ya fue completado con un reconteo distinto.',
+    );
   }
 
   if (count.status !== 'RECOUNT_REQUIRED') {
@@ -432,10 +504,19 @@ export async function submitInventoryRecount(
     return await fastify.db.$transaction(async (tx) => {
       const updateResult = await tx.inventoryCount.updateMany({
         where: { id: countId, organizationId, status: 'RECOUNT_REQUIRED' },
-        data: { status: 'COMPLETED', recountedAt: new Date(), completedAt: new Date() },
+        data: {
+          status: 'COMPLETED',
+          recountedAt: new Date(),
+          completedAt: new Date(),
+          recountIdempotencyKey: input.idempotencyKey,
+          recountIdempotencyFingerprint: fingerprint,
+        },
       });
       if (updateResult.count === 0) {
-        // Otra transacción ganó la carrera entre la lectura de arriba y acá.
+        // Otra transacción ganó la carrera entre la lectura de arriba y
+        // acá -- se resuelve AFUERA de esta transacción (ver el catch),
+        // reconsultando lo que esa otra transacción efectivamente dejó
+        // persistido, nunca asumiendo un conflicto sin comparar.
         throw new ConflictError(
           'Este conteo ya fue completado por otra solicitud; volvé a consultarlo.',
         );
@@ -479,7 +560,24 @@ export async function submitInventoryRecount(
       return mapCount(updated);
     });
   } catch (err) {
-    if (err instanceof ConflictError) throw err;
+    if (isUniqueConstraintViolationOn(err, RECOUNT_IDEMPOTENCY_KEY_TARGET)) {
+      return resolveRecountConflictAfterRace(
+        fastify,
+        organizationId,
+        countId,
+        input.idempotencyKey,
+        fingerprint,
+      );
+    }
+    if (err instanceof ConflictError) {
+      return resolveRecountConflictAfterRace(
+        fastify,
+        organizationId,
+        countId,
+        input.idempotencyKey,
+        fingerprint,
+      );
+    }
     throw err;
   }
 }

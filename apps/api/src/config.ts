@@ -41,10 +41,14 @@ const envSchema = z.object({
   /// Fracción numérica que representa "casi vacía" al convertir el conteo
   /// estimado de una lata abierta a cantidad canónica (las otras cuatro
   /// fracciones -- llena/3/4/1/2/1/4 -- son literales, no una decisión de
-  /// negocio). "Casi vacía" no tiene un valor literal: 0.10 es un supuesto
-  /// documentado, configurable, pendiente de confirmación del cliente -- ver
+  /// negocio). "Casi vacía" NO tiene un valor literal ni un default: el
+  /// cliente nunca confirmó a qué número equivale (Etapa 4.1, sección 1).
+  /// Deliberadamente SIN `.default(...)` -- si no está configurada,
+  /// `openContainerFractionMultiplier` (apps/api/src/services/bulk-flavor.ts)
+  /// rechaza con un error explícito de configuración en vez de inventar un
+  /// número o dejar pasar un NaN/cero implícito. Ver
   /// docs/ETAPA-4-APP-HELADERIA.md, "Supuestos".
-  BULK_FLAVOR_NEARLY_EMPTY_FRACTION: z.coerce.number().min(0).max(1).default(0.1),
+  BULK_FLAVOR_NEARLY_EMPTY_FRACTION: z.coerce.number().min(0).max(1).optional(),
 });
 
 export type AppConfig = ReturnType<typeof loadConfig>;

@@ -674,6 +674,17 @@ model InventoryCount {
   idempotencyKey         String @map("idempotency_key")
   idempotencyFingerprint String @map("idempotency_fingerprint")
 
+  /// Idempotencia del RECONTEO (Etapa 4.1, sección 2/3 -- corrige que dos
+  /// requests concurrentes representando el mismo reconteo pudieran
+  /// resolver en 2xx/409 en vez de 2xx/2xx). Columnas separadas de
+  /// `idempotencyKey`/`idempotencyFingerprint` de arriba (esas son del
+  /// envío ORIGINAL del conteo, una operación distinta) -- nunca se
+  /// reutiliza ambiguamente una clave para dos operaciones diferentes.
+  /// NULL hasta que este conteo efectivamente pase por un reconteo (a lo
+  /// sumo una ronda adicional, sección 5 del prompt original).
+  recountIdempotencyKey         String? @map("recount_idempotency_key")
+  recountIdempotencyFingerprint String? @map("recount_idempotency_fingerprint")
+
   organization Organization         @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   location     Location             @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
   createdBy    AppUser              @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
@@ -688,6 +699,11 @@ model InventoryCount {
   /// duplica acá).
   @@unique([organizationId, locationId, weekStart])
   @@unique([organizationId, idempotencyKey])
+  /// NULLs no colisionan entre sí en un índice único de Postgres, así que
+  /// esto sólo restringe reutilizar la misma clave de RECONTEO en dos
+  /// conteos distintos -- no afecta a los conteos que todavía no tuvieron
+  /// ningún reconteo.
+  @@unique([organizationId, recountIdempotencyKey])
   @@index([organizationId, locationId, weekStart])
   @@map("inventory_count")
 }

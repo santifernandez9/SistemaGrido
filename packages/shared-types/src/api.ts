@@ -31,6 +31,11 @@ export const API_ERROR_CODES = [
   'NOT_FOUND',
   'CONFLICT',
   'INTERNAL_ERROR',
+  /** La operación es válida pero el backend no tiene la configuración
+   * necesaria para completarla (Etapa 4.1) -- ej. una fracción "casi vacía"
+   * sin valor confirmado. Distinto de un error inesperado (INTERNAL_ERROR):
+   * el mensaje siempre se expone al cliente, incluso en producción. */
+  'CONFIGURATION_ERROR',
 ] as const;
 
 export type ApiErrorCode = (typeof API_ERROR_CODES)[number];

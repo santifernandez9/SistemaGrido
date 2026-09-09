@@ -537,11 +537,28 @@ describe('/api/shop', () => {
       expect(body.items[0].physicalQuantity).toBe('960.000');
     });
 
-    it('retry idempotente por valor: reenviar el mismo reconteo tras COMPLETED no falla', async () => {
+    async function submitFlaggedCountTwoItems() {
+      app.config.shopOps.recountThresholdClosedProducts = 5;
+      app.config.shopOps.recountThresholdBulkFlavor = 5;
+      await loadInitialStock(locationShop, productClosed, '1000');
+      await loadInitialStock(locationShop, productFlavor, '1000');
+      const response = await submitCount(adminAuthHeader, {
+        locationId: locationShop,
+        weekStart: '2026-09-07',
+        items: [
+          { productId: productClosed, closedUnits: 0, openUnits: 1 },
+          { productId: productFlavor, closedUnits: 1, openUnits: 0 },
+        ],
+        idempotencyKey: 'conteo-para-reconteo-2items',
+      });
+      return response.json().data;
+    }
+
+    it('retry idempotente por clave: reenviar el mismo reconteo (misma idempotencyKey) tras COMPLETED devuelve el mismo resultado, sin volver a auditar', async () => {
       const count = await submitFlaggedCount();
       const payload = {
         items: [{ productId: productClosed, closedUnits: 80 }],
-        idempotencyKey: 'reconteo-retry-a',
+        idempotencyKey: 'reconteo-retry-misma-clave',
       };
       const first = await app.inject({
         method: 'POST',
@@ -555,13 +572,46 @@ describe('/api/shop', () => {
         method: 'POST',
         url: `/api/shop/counts/${count.id}/recount`,
         headers: adminAuthHeader,
-        payload: { ...payload, idempotencyKey: 'reconteo-retry-b' },
+        payload, // misma idempotencyKey, mismo payload
       });
       expect(retry.statusCode).toBe(200);
       expect(retry.json().data.id).toBe(first.json().data.id);
+      expect(retry.json().data.items[0].physicalQuantity).toBe(
+        first.json().data.items[0].physicalQuantity,
+      );
+
+      const auditRows = await prisma.auditLog.count({
+        where: { organizationId, action: 'SHOP_COUNT_RECOUNTED', entityId: count.id },
+      });
+      expect(auditRows).toBe(1);
     });
 
-    it('reenviar un reconteo con valores distintos tras COMPLETED es un conflicto (409)', async () => {
+    it('retry secuencial con la MISMA clave pero valores distintos es un conflicto (409, no reutiliza ambiguamente la clave)', async () => {
+      const count = await submitFlaggedCount();
+      const key = 'reconteo-misma-clave-otro-payload';
+      const first = await app.inject({
+        method: 'POST',
+        url: `/api/shop/counts/${count.id}/recount`,
+        headers: adminAuthHeader,
+        payload: { items: [{ productId: productClosed, closedUnits: 80 }], idempotencyKey: key },
+      });
+      expect(first.statusCode).toBe(200);
+
+      const conflicting = await app.inject({
+        method: 'POST',
+        url: `/api/shop/counts/${count.id}/recount`,
+        headers: adminAuthHeader,
+        payload: { items: [{ productId: productClosed, closedUnits: 50 }], idempotencyKey: key },
+      });
+      expect(conflicting.statusCode).toBe(409);
+
+      const auditRows = await prisma.auditLog.count({
+        where: { organizationId, action: 'SHOP_COUNT_RECOUNTED', entityId: count.id },
+      });
+      expect(auditRows).toBe(1);
+    });
+
+    it('retry secuencial con OTRA clave y valores distintos tras COMPLETED es un conflicto (409)', async () => {
       const count = await submitFlaggedCount();
       await app.inject({
         method: 'POST',
@@ -583,9 +633,119 @@ describe('/api/shop', () => {
         },
       });
       expect(conflicting.statusCode).toBe(409);
+
+      const auditRows = await prisma.auditLog.count({
+        where: { organizationId, action: 'SHOP_COUNT_RECOUNTED', entityId: count.id },
+      });
+      expect(auditRows).toBe(1);
     });
 
-    it('dos reconteos CONCURRENTES del mismo conteo: exactamente uno gana', async () => {
+    it('canonicalización: los mismos ítems en distinto orden se reconocen como la MISMA operación (mismo resultado exitoso)', async () => {
+      const count = await submitFlaggedCountTwoItems();
+      const key = 'reconteo-canonicalizacion';
+      const itemsInOrderA = [
+        { productId: productClosed, closedUnits: 80 },
+        { productId: productFlavor, closedUnits: 500 },
+      ];
+      const itemsInOrderB = [...itemsInOrderA].reverse();
+
+      const first = await app.inject({
+        method: 'POST',
+        url: `/api/shop/counts/${count.id}/recount`,
+        headers: adminAuthHeader,
+        payload: { items: itemsInOrderA, idempotencyKey: key },
+      });
+      expect(first.statusCode).toBe(200);
+
+      const retryReordered = await app.inject({
+        method: 'POST',
+        url: `/api/shop/counts/${count.id}/recount`,
+        headers: adminAuthHeader,
+        payload: { items: itemsInOrderB, idempotencyKey: key },
+      });
+      expect(retryReordered.statusCode).toBe(200);
+      expect(retryReordered.json().data.id).toBe(first.json().data.id);
+
+      const auditRows = await prisma.auditLog.count({
+        where: { organizationId, action: 'SHOP_COUNT_RECOUNTED', entityId: count.id },
+      });
+      expect(auditRows).toBe(1);
+    });
+
+    it('dos reconteos CONCURRENTES IDÉNTICOS (misma clave, mismo payload): ambos exitosos, un único efecto persistido, una sola auditoría', async () => {
+      const count = await submitFlaggedCount();
+      const payload = {
+        items: [{ productId: productClosed, closedUnits: 80 }],
+        idempotencyKey: 'reconteo-concurrente-identico',
+      };
+
+      const [responseA, responseB] = await Promise.all([
+        app.inject({
+          method: 'POST',
+          url: `/api/shop/counts/${count.id}/recount`,
+          headers: adminAuthHeader,
+          payload,
+        }),
+        app.inject({
+          method: 'POST',
+          url: `/api/shop/counts/${count.id}/recount`,
+          headers: adminAuthHeader,
+          payload,
+        }),
+      ]);
+
+      // Ninguno de los dos debe recibir 409 -- ambos representan la misma
+      // operación, así que ambos deben resolver como un retry idempotente
+      // exitoso (Etapa 4.1, objetivo: "ambos deben poder obtener el mismo
+      // resultado exitoso").
+      expect(responseA.statusCode).toBe(200);
+      expect(responseB.statusCode).toBe(200);
+      expect(responseA.json().data.id).toBe(responseB.json().data.id);
+      expect(responseA.json().data.items[0].physicalQuantity).toBe('960.000');
+      expect(responseB.json().data.items[0].physicalQuantity).toBe('960.000');
+
+      // Un único efecto persistido: el ítem no quedó escrito dos veces con
+      // valores distintos, y una sola auditoría (no doble procesamiento).
+      const itemRow = await prisma.inventoryCountItem.findFirst({
+        where: { organizationId, countId: count.id, productId: productClosed },
+      });
+      expect(itemRow?.physicalQuantity.toString()).toBe('960');
+
+      const auditRows = await prisma.auditLog.count({
+        where: { organizationId, action: 'SHOP_COUNT_RECOUNTED', entityId: count.id },
+      });
+      expect(auditRows).toBe(1);
+    });
+
+    it('dos reconteos CONCURRENTES con la MISMA clave pero payload DISTINTO: uno gana, el incompatible devuelve 409, una sola auditoría', async () => {
+      const count = await submitFlaggedCount();
+      const key = 'reconteo-concurrente-misma-clave-payload-distinto';
+
+      const [responseA, responseB] = await Promise.all([
+        app.inject({
+          method: 'POST',
+          url: `/api/shop/counts/${count.id}/recount`,
+          headers: adminAuthHeader,
+          payload: { items: [{ productId: productClosed, closedUnits: 80 }], idempotencyKey: key },
+        }),
+        app.inject({
+          method: 'POST',
+          url: `/api/shop/counts/${count.id}/recount`,
+          headers: adminAuthHeader,
+          payload: { items: [{ productId: productClosed, closedUnits: 50 }], idempotencyKey: key },
+        }),
+      ]);
+
+      const statusCodes = [responseA.statusCode, responseB.statusCode].sort();
+      expect(statusCodes).toEqual([200, 409]);
+
+      const auditRows = await prisma.auditLog.count({
+        where: { organizationId, action: 'SHOP_COUNT_RECOUNTED', entityId: count.id },
+      });
+      expect(auditRows).toBe(1);
+    });
+
+    it('dos reconteos CONCURRENTES con claves y payloads DISTINTOS: exactamente uno gana, una sola auditoría', async () => {
       const count = await submitFlaggedCount();
       const [responseA, responseB] = await Promise.all([
         app.inject({
@@ -609,6 +769,84 @@ describe('/api/shop', () => {
       ]);
       const statusCodes = [responseA.statusCode, responseB.statusCode].sort();
       expect(statusCodes).toEqual([200, 409]);
+
+      const auditRows = await prisma.auditLog.count({
+        where: { organizationId, action: 'SHOP_COUNT_RECOUNTED', entityId: count.id },
+      });
+      expect(auditRows).toBe(1);
+    });
+  });
+
+  // --- fracción "casi vacía" (NEARLY_EMPTY) -- Etapa 4.1 ---------------------
+
+  describe('fracción "casi vacía" (NEARLY_EMPTY)', () => {
+    it('con BULK_FLAVOR_NEARLY_EMPTY_FRACTION configurada, convierte correctamente', async () => {
+      app.config.shopOps.bulkFlavorNearlyEmptyFraction = 0.2; // valor arbitrario, nunca el viejo 0.10
+      const response = await submitCount(adminAuthHeader, {
+        locationId: locationShop,
+        weekStart: '2026-09-07',
+        items: [
+          { productId: productFlavor, closedUnits: 0, openUnits: 1, openFraction: 'NEARLY_EMPTY' },
+        ],
+        idempotencyKey: 'casi-vacia-configurada',
+      });
+      expect(response.statusCode).toBe(201);
+      // productFlavor tiene unitsPerHandlingUnit = 1: 1 unidad * 0.2 * 1 = 0.200.
+      expect(response.json().data.items[0].physicalQuantity).toBe('0.200');
+    });
+
+    it('sin configurar, rechaza con un error explícito de configuración (503), sin fallback ni NaN', async () => {
+      // El entorno de test no define BULK_FLAVOR_NEARLY_EMPTY_FRACTION (ver
+      // apps/api/vitest.config.ts) -- éste es exactamente el estado "sin
+      // configurar" que debe rechazarse, nunca resolverse en silencio.
+      const response = await submitCount(adminAuthHeader, {
+        locationId: locationShop,
+        weekStart: '2026-09-07',
+        items: [
+          { productId: productFlavor, closedUnits: 0, openUnits: 1, openFraction: 'NEARLY_EMPTY' },
+        ],
+        idempotencyKey: 'casi-vacia-sin-configurar',
+      });
+      expect(response.statusCode).toBe(503);
+      expect(response.json().error.code).toBe('CONFIGURATION_ERROR');
+      expect(response.json().error.message).toMatch(/casi vacía|NEARLY_EMPTY/i);
+
+      // No debe quedar ningún estado a medio crear: el rechazo ocurre ANTES
+      // de la transacción, así que no se persiste ni el conteo ni sus ítems.
+      const counts = await prisma.inventoryCount.count({
+        where: { organizationId, idempotencyKey: 'casi-vacia-sin-configurar' },
+      });
+      expect(counts).toBe(0);
+    });
+
+    it('las demás fracciones confirmadas (LLENA, 3/4, 1/2, 1/4) siguen funcionando sin necesitar ninguna configuración', async () => {
+      const cases: {
+        weekStart: string;
+        fraction: 'FULL' | 'THREE_QUARTERS' | 'HALF' | 'QUARTER';
+        expected: string;
+      }[] = [
+        { weekStart: '2026-08-03', fraction: 'FULL', expected: '1.000' },
+        { weekStart: '2026-08-10', fraction: 'THREE_QUARTERS', expected: '0.750' },
+        { weekStart: '2026-08-17', fraction: 'HALF', expected: '0.500' },
+        { weekStart: '2026-08-24', fraction: 'QUARTER', expected: '0.250' },
+      ];
+      for (const testCase of cases) {
+        const response = await submitCount(adminAuthHeader, {
+          locationId: locationShop,
+          weekStart: testCase.weekStart,
+          items: [
+            {
+              productId: productFlavor,
+              closedUnits: 0,
+              openUnits: 1,
+              openFraction: testCase.fraction,
+            },
+          ],
+          idempotencyKey: `fraccion-confirmada-${testCase.fraction}`,
+        });
+        expect(response.statusCode).toBe(201);
+        expect(response.json().data.items[0].physicalQuantity).toBe(testCase.expected);
+      }
     });
   });
 
