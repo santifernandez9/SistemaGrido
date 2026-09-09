@@ -76,6 +76,11 @@ model Organization {
   wastes              Waste[]
   variableExpenses    VariableExpense[]
   stockoutEvents      StockoutEvent[]
+  salesImports        SalesImport[]
+  salesImportRows     SalesImportRow[]
+  sales               Sale[]
+  productAliases      ProductAlias[]
+  billOfMaterialItems BillOfMaterialItem[]
 
   @@map("organization")
 }
@@ -95,6 +100,8 @@ model Location {
   inventoryCounts    InventoryCount[]
   variableExpenses   VariableExpense[]
   stockoutEvents     StockoutEvent[]
+  salesImports       SalesImport[]
+  sales              Sale[]
 
   @@unique([organizationId, name])
   /// Habilita FKs compuestas (organizationId, locationId) desde AppUser,
@@ -138,8 +145,8 @@ model AppUser {
   createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  role               Role                @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  organization            Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  role                    Role                @relation(fields: [roleId], references: [id], onDelete: Restrict)
   /// FK compuesta (organizationId, defaultLocationId) -> Location(organizationId, id):
   /// pendiente detectado en Etapa 2.1 (docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md,
   /// sección 14), corregido acá porque Etapa 3 ya necesita tocar AppUser/Location
@@ -150,12 +157,19 @@ model AppUser {
   /// Prisma lo señala como advertencia de esquema inválido. `Restrict` es
   /// coherente con el resto del esquema y con que `Location` nunca se borra
   /// físicamente (baja lógica vía `active`, Etapa 2).
-  defaultLocation    Location?           @relation(fields: [organizationId, defaultLocationId], references: [organizationId, id], onDelete: Restrict)
-  auditLogs          AuditLog[]
-  inventoryMovements InventoryMovement[]
-  inventoryCounts    InventoryCount[]
-  variableExpenses   VariableExpense[]
-  stockoutEvents     StockoutEvent[]
+  defaultLocation         Location?           @relation(fields: [organizationId, defaultLocationId], references: [organizationId, id], onDelete: Restrict)
+  auditLogs               AuditLog[]
+  inventoryMovements      InventoryMovement[]
+  inventoryCounts         InventoryCount[]
+  variableExpenses        VariableExpense[]
+  stockoutEvents          StockoutEvent[]
+  /// Etapa 5 -- dos relaciones nombradas hacia AppUser porque un import
+  /// distingue quién lo subió de quién lo confirmó (pueden ser personas
+  /// distintas).
+  salesImportsCreated     SalesImport[]       @relation("SalesImportCreatedBy")
+  salesImportsConfirmed   SalesImport[]       @relation("SalesImportConfirmedBy")
+  sales                   Sale[]
+  productAliasesConfirmed ProductAlias[]
 
   /// Habilita FKs compuestas (organizationId, userId) desde AuditLog e
   /// InventoryMovement (createdBy) — Etapa 3.
@@ -378,6 +392,13 @@ model Product {
   inventoryMovements  InventoryMovement[]
   inventoryCountItems InventoryCountItem[]
   stockoutEvents      StockoutEvent[]
+  sales               Sale[]
+  productAliases      ProductAlias[]
+  /// Etapa 5 -- dos relaciones nombradas: un producto puede aparecer tanto
+  /// como el producto VENDIDO de una receta (BomProduct) como el INSUMO
+  /// consumido por la receta de otro producto (BomComponent).
+  bomItemsAsProduct   BillOfMaterialItem[] @relation("BomProduct")
+  bomItemsAsComponent BillOfMaterialItem[] @relation("BomComponent")
 
   @@unique([organizationId, code])
   /// Habilita la FK compuesta (organizationId, productId) desde InventoryMovement — Etapa 3.
@@ -875,4 +896,316 @@ model StockoutEvent {
   @@unique([organizationId, idempotencyKey])
   @@index([organizationId, locationId, occurredAt])
   @@map("stockout_event")
+}
+
+// ---------------------------------------------------------------------------
+// Importador de ventas (Etapa 5) — ver docs/ETAPA-5-IMPORTADOR-VENTAS.md.
+//
+// Fuente real inspeccionada: reporte "Mix de Ventas" del POS (archivo real
+// del cliente, exportado con el filtro "Precios: Desagrupados" para no
+// perder la identificación de Canje/promoción por línea -- la variante
+// "Agrupados" fusiona esas líneas y pierde esa distinción). Un producto se
+// identifica por el código numérico `articulo` del POS (estable entre
+// filas), nunca por su descripción de texto (que cambia según el precio o
+// la promoción aplicada). Ni el conteo ni la baja de lata ni la merma se
+// tocan -- este importador sólo agrega SALE y BOM_CONSUMPTION al ledger ya
+// existente de Etapa 3, reutilizando `sourceDocumentType`/`sourceDocumentId`
+// (ya RESERVADOS desde Etapa 3 para esto) en vez de una tabla de
+// trazabilidad nueva.
+
+/// Origen técnico de un import (identifica qué parser/columnas usar). Sólo
+/// `MIX_VENTAS` tiene evidencia real hoy -- agregar un origen nuevo (ej. un
+/// futuro importador de cierres de Mercado Pago, mencionado por el cliente
+/// pero fuera de alcance de esta etapa) es una migración simple que agrega
+/// un valor al enum, no un rediseño.
+enum SalesImportSource {
+  MIX_VENTAS
+}
+
+/// Estados del import (sección 15 del prompt de Etapa 5). Una vez
+/// CONFIRMED, sus efectos (Sale, movimientos SALE/BOM_CONSUMPTION,
+/// auditoría) son inmutables -- una corrección futura es una reversa
+/// trazable, nunca una edición silenciosa.
+enum SalesImportStatus {
+  /// Archivo recibido, todavía sin parsear (estado transitorio dentro de la
+  /// misma request de subida).
+  UPLOADED
+  /// Parseado con éxito; puede confirmarse (puede tener filas UNMAPPED --
+  /// eso nunca bloquea, sección 7).
+  PREVIEW_READY
+  /// Parseado, pero el total de las filas válidas no reconcilia contra el
+  /// "Total General" que el propio archivo declara -- condición crítica sin
+  /// resolver (sección 13): no se puede confirmar hasta subir un archivo
+  /// corregido.
+  BLOCKED
+  /// Confirmado: ventas, movimientos SALE/BOM_CONSUMPTION y auditoría ya
+  /// generados, de forma inmutable.
+  CONFIRMED
+  /// El archivo no pudo interpretarse en absoluto (formato no soportado,
+  /// hoja/encabezados distintos a los esperados) -- no llega a generar
+  /// ningún preview.
+  FAILED
+}
+
+/// Validez de una fila parseada (no confunde "sin mapear" -- que es un
+/// estado normal y esperado, sección 7 -- con "dato corrupto"). El mapeo a
+/// Product se resuelve en vivo contra ProductAlias en cada consulta de
+/// preview/confirmación, nunca se cachea acá -- así un alias creado después
+/// de la subida se toma en cuenta sin tener que resubir el archivo.
+enum SalesImportRowStatus {
+  VALID
+  ERROR
+}
+
+/// Una subida de archivo (RF de Etapa 5, sección 6 del prompt: "Admin
+/// selecciona ubicación... Admin sube archivo"). `fileHash` es un SHA-256
+/// del contenido exacto del archivo -- la idempotencia de subida (sección
+/// 8) se apoya en el índice único de abajo, nunca en el nombre del archivo.
+model SalesImport {
+  id             String            @id @default(uuid()) @db.Uuid
+  organizationId String            @map("organization_id") @db.Uuid
+  locationId     String            @map("location_id") @db.Uuid
+  source         SalesImportSource
+
+  originalFilename String  @map("original_filename")
+  fileHash         String  @map("file_hash")
+  /// Path en Supabase Storage del archivo original conservado (sección 19
+  /// del prompt) -- nunca el contenido en base64 en esta tabla.
+  storagePath      String? @map("storage_path")
+
+  /// Rango de fechas que el propio reporte declara (columnas `desde`/`hasta`
+  /// del archivo) -- el archivo no trae fecha por línea (limitación real del
+  /// export, documentada como supuesto en vez de inventar una fecha por
+  /// venta).
+  periodStart DateTime @map("period_start") @db.Date
+  periodEnd   DateTime @map("period_end") @db.Date
+
+  status SalesImportStatus @default(UPLOADED)
+
+  totalRows       Int      @default(0) @map("total_rows")
+  validRows       Int      @default(0) @map("valid_rows")
+  errorRows       Int      @default(0) @map("error_rows")
+  totalQuantity   Decimal  @default(0) @map("total_quantity") @db.Decimal(14, 3)
+  totalAmount     Decimal  @default(0) @map("total_amount") @db.Decimal(14, 2)
+  /// Total que el propio archivo declara en su fila "Total General" --
+  /// usado para la reconciliación de la sección 13, conservado para
+  /// auditoría/depuración.
+  fileStatedTotal Decimal? @map("file_stated_total") @db.Decimal(14, 2)
+
+  blockedReason String? @map("blocked_reason")
+  failedReason  String? @map("failed_reason")
+
+  createdById String   @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  confirmedById String?   @map("confirmed_by") @db.Uuid
+  confirmedAt   DateTime? @map("confirmed_at") @db.Timestamptz(6)
+
+  /// Idempotencia de la CONFIRMACIÓN (sección 9 del prompt, mismo patrón
+  /// endurecido en Etapa 3.2/4.1: clave + fingerprint + UNIQUE + resolución
+  /// explícita de carrera) -- deliberadamente separada de `fileHash` (esa es
+  /// la idempotencia de SUBIDA, una operación distinta).
+  confirmIdempotencyKey         String? @map("confirm_idempotency_key")
+  confirmIdempotencyFingerprint String? @map("confirm_idempotency_fingerprint")
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location     Location         @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  createdBy    AppUser          @relation("SalesImportCreatedBy", fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+  confirmedBy  AppUser?         @relation("SalesImportConfirmedBy", fields: [organizationId, confirmedById], references: [organizationId, id], onDelete: Restrict)
+  rows         SalesImportRow[]
+  sales        Sale[]
+
+  /// Habilita la FK compuesta (organizationId, salesImportId) desde
+  /// SalesImportRow/Sale.
+  @@unique([organizationId, id])
+  /// Idempotencia de SUBIDA (sección 8): subir el mismo archivo exacto dos
+  /// veces para la misma ubicación no genera un segundo import. NULL no
+  /// colisiona con NULL (no aplica acá, fileHash siempre se completa al
+  /// crear la fila).
+  @@unique([organizationId, locationId, fileHash])
+  @@unique([organizationId, confirmIdempotencyKey])
+  @@index([organizationId, locationId, createdAt])
+  @@map("sales_import")
+}
+
+/// Una fila del archivo ya parseada y validada (RF sección 5: "filas
+/// originales relevantes"). Guarda sólo las columnas REALMENTE presentes en
+/// el archivo real inspeccionado -- ver docs/ETAPA-5-IMPORTADOR-VENTAS.md,
+/// "Columnas utilizadas/ignoradas" -- nunca el Excel entero como blob.
+model SalesImportRow {
+  id             String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  salesImportId  String @map("sales_import_id") @db.Uuid
+
+  /// Número de fila en el archivo original (base 0, incluye el encabezado)
+  /// -- para que un error se pueda señalar exactamente como en el Excel.
+  rowNumber Int @map("row_number")
+
+  /// Código numérico de artículo del POS (columna `articulo`) -- identidad
+  /// ESTABLE del producto entre filas, nunca la descripción de texto
+  /// (sección 7 del prompt: "no usar nombre como FK").
+  rawArticleCode String @map("raw_article_code")
+  /// Descripción completa tal cual viene en el archivo (columna
+  /// `artdescrip`), incluyendo el sufijo de promoción/Canje entre
+  /// paréntesis cuando corresponde -- nunca editada.
+  rawDescription String @map("raw_description")
+  /// Grupo/rubro del artículo (columna `grudescrip`) -- sólo informativo.
+  rawGroup       String @map("raw_group")
+
+  /// Cantidad vendida (columna `cantidad`), en la unidad de manejo PROPIA
+  /// del artículo tal como lo carga el POS -- la conversión a cantidad
+  /// canónica la hace el backend con `Product.unitsPerHandlingUnit` al
+  /// confirmar, igual criterio que el resto del ledger (nunca en el
+  /// cliente).
+  quantity Decimal @db.Decimal(14, 3)
+  /// Importe REAL de la línea (columna `total`) -- la facturación se toma
+  /// de acá, nunca de un precio de lista teórico (sección 3 del prompt).
+  amount   Decimal @db.Decimal(14, 2)
+
+  /// true si la columna `promocion` viene con un código distinto de cero --
+  /// el POS aplicó algún precio promocional a esta línea (Canje u otro tipo
+  /// de promoción, p. ej. descuentos de apps de delivery).
+  isPromotion   Boolean @default(false) @map("is_promotion")
+  /// true si, además, la descripción incluye la palabra "Canje" (evidencia
+  /// real: es el único indicador textual que el propio archivo usa para un
+  /// canje puntual -- nunca se asume un % fijo de descuento, sección 4 del
+  /// prompt).
+  isCanje       Boolean @default(false) @map("is_canje")
+  promotionCode String? @map("promotion_code")
+
+  /// Columnas presentes en el archivo real pero sólo informativas (sección
+  /// 3 del prompt: "se pueden almacenar cuando sean útiles, sólo si están
+  /// efectivamente presentes") -- ninguna participa del cálculo de
+  /// facturación ni de stock.
+  unitPriceAvg Decimal? @map("unit_price_avg") @db.Decimal(14, 4)
+  bultos       String?
+  kilos        Decimal? @db.Decimal(14, 3)
+  pctOfTotal   Decimal? @map("pct_of_total") @db.Decimal(9, 4)
+
+  status       SalesImportRowStatus
+  errorMessage String?              @map("error_message")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  salesImport  SalesImport  @relation(fields: [organizationId, salesImportId], references: [organizationId, id], onDelete: Restrict)
+  sale         Sale?
+
+  @@unique([organizationId, salesImportId, rowNumber])
+  /// Habilita la FK compuesta (organizationId, salesImportRowId) desde Sale.
+  @@unique([organizationId, id])
+  @@index([organizationId, salesImportId, status])
+  @@map("sales_import_row")
+}
+
+/// Mapeo ADMIN-confirmado entre un código externo (`articulo` del POS) y un
+/// Product del catálogo (sección 7 del prompt: "alias por fuente"). Nunca
+/// se crea sola/automáticamente -- toda fila de acá la escribió
+/// explícitamente un ADMIN (`confirmedById`), incluso si el valor sugerido
+/// vino de una coincidencia textual.
+model ProductAlias {
+  id                  String            @id @default(uuid()) @db.Uuid
+  organizationId      String            @map("organization_id") @db.Uuid
+  source              SalesImportSource
+  externalCode        String            @map("external_code")
+  /// Última descripción externa vista para este código -- sólo para mostrar
+  /// contexto en el admin-web, nunca se usa para resolver el mapeo.
+  externalDescription String?           @map("external_description")
+  productId           String            @map("product_id") @db.Uuid
+
+  confirmedById String   @map("confirmed_by") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  product      Product      @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  confirmedBy  AppUser      @relation(fields: [organizationId, confirmedById], references: [organizationId, id], onDelete: Restrict)
+
+  /// A lo sumo un mapeo por código externo, por fuente, por organización.
+  @@unique([organizationId, source, externalCode])
+  @@index([organizationId, productId])
+  @@map("product_alias")
+}
+
+/// Receta/BOM (RF-007 e Insumos y BOM/recetas del documento del cliente,
+/// sección 18: "las recetas se gestionan en base de datos, nunca
+/// hardcodeadas"). `quantityPerUnit` está expresada en unidad CANÓNICA del
+/// componente por cada unidad CANÓNICA del producto vendido -- mismo
+/// criterio de "todo en unidad canónica" que ya usa `InventoryMovement`.
+model BillOfMaterialItem {
+  id             String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+
+  /// Producto VENDIDO (el que dispara el consumo al confirmarse una venta).
+  productId          String  @map("product_id") @db.Uuid
+  /// Insumo/componente CONSUMIDO por cada unidad del producto vendido.
+  componentProductId String  @map("component_product_id") @db.Uuid
+  quantityPerUnit    Decimal @map("quantity_per_unit") @db.Decimal(14, 6)
+
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  product          Product      @relation("BomProduct", fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  componentProduct Product      @relation("BomComponent", fields: [organizationId, componentProductId], references: [organizationId, id], onDelete: Restrict)
+
+  /// Una única línea de receta por par (producto vendido, componente) --
+  /// para cambiar la cantidad se actualiza esta fila, no se duplica.
+  @@unique([organizationId, productId, componentProductId])
+  @@index([organizationId, productId])
+  @@map("bill_of_material_item")
+}
+
+/// Venta CONFIRMADA (hecho inmutable, sección 5/15 del prompt) -- distinta
+/// de `SalesImportRow` (el dato crudo parseado, que existe desde el
+/// preview). Sólo se crea una fila acá para una `SalesImportRow` que, al
+/// momento de la confirmación, resuelve a un Product vía ProductAlias
+/// (sección 7: "si no está mapeado, no impactar stock" -- una fila sin
+/// mapear nunca genera un Sale). `occurredAt` usa `periodEnd` del import:
+/// el archivo no trae fecha por línea (ver comentario de SalesImport) --
+/// supuesto documentado, reversible sin migrar.
+model Sale {
+  id             String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  locationId     String @map("location_id") @db.Uuid
+
+  salesImportId    String @map("sales_import_id") @db.Uuid
+  salesImportRowId String @map("sales_import_row_id") @db.Uuid
+  productId        String @map("product_id") @db.Uuid
+
+  quantity   Decimal @db.Decimal(14, 3)
+  amountReal Decimal @map("amount_real") @db.Decimal(14, 2)
+
+  isPromotion Boolean @default(false) @map("is_promotion")
+  isCanje     Boolean @default(false) @map("is_canje")
+
+  occurredAt DateTime @map("occurred_at") @db.Timestamptz(6)
+
+  /// El movimiento SALE que esta venta generó en el ledger (1:1, mismo
+  /// patrón que `Waste.movementId` de Etapa 4: reutiliza el ledger
+  /// existente en vez de duplicar su idempotencia/transacción). Los
+  /// eventuales movimientos BOM_CONSUMPTION de esta venta se referencian al
+  /// revés, vía `InventoryMovement.sourceDocumentType = 'SALE'` +
+  /// `sourceDocumentId = Sale.id` (mismo mecanismo RESERVADO desde Etapa 3,
+  /// sin agregar una tabla de trazabilidad nueva).
+  movementId String @map("movement_id") @db.Uuid
+
+  createdById String   @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location       Location       @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  salesImport    SalesImport    @relation(fields: [organizationId, salesImportId], references: [organizationId, id], onDelete: Restrict)
+  salesImportRow SalesImportRow @relation(fields: [organizationId, salesImportRowId], references: [organizationId, id], onDelete: Restrict)
+  product        Product        @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  createdBy      AppUser        @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+
+  /// A lo sumo una Sale por fila importada -- protege contra un retry de
+  /// confirmación que intente crear la venta dos veces por fuera de la
+  /// idempotencia de `SalesImport.confirmIdempotencyKey` (defensa en
+  /// profundidad, mismo criterio que Waste.movementId).
+  @@unique([organizationId, salesImportRowId])
+  @@unique([organizationId, movementId])
+  @@index([organizationId, locationId, occurredAt])
+  @@map("sale")
 }

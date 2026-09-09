@@ -10,6 +10,7 @@ import { ProductsPage } from './pages/ProductsPage.js';
 import { InventoryStockPage } from './pages/InventoryStockPage.js';
 import { InventoryMovementsPage } from './pages/InventoryMovementsPage.js';
 import { ShopOpsPage } from './pages/ShopOpsPage.js';
+import { SalesImportPage } from './pages/SalesImportPage.js';
 import { Layout } from './components/Layout.js';
 
 /**
@@ -95,6 +96,14 @@ export function App() {
           element={
             <RequireAuth roles={['ADMIN']}>
               <ShopOpsPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="ventas"
+          element={
+            <RequireAuth roles={['ADMIN']}>
+              <SalesImportPage />
             </RequireAuth>
           }
         />

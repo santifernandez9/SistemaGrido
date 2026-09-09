@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import rateLimit from '@fastify/rate-limit';
+import multipart from '@fastify/multipart';
 import { loadConfig, type AppConfig } from './config.js';
 import { buildLoggerOptions } from './logger.js';
 import configPlugin from './plugins/config.js';
@@ -22,6 +23,7 @@ import productsRoutes from './routes/products.js';
 import inventoryRoutes from './routes/inventory.js';
 import shopOpsRoutes from './routes/shop-ops.js';
 import attachmentsRoutes from './routes/attachments.js';
+import salesImportRoutes from './routes/sales-import.js';
 
 /**
  * Arma la app de Fastify sin escucharla en un puerto -- así `src/index.ts` la usa
@@ -62,6 +64,19 @@ export async function buildServer(overrides?: Partial<AppConfig>): Promise<Fasti
     timeWindow: '1 minute',
   });
 
+  // Etapa 5: el importador de ventas necesita los bytes del archivo en el
+  // backend para parsearlo (node-xlrd sólo lee desde disco, ver
+  // sales-import-parser.ts) -- a diferencia de las fotos/comprobantes de
+  // Etapa 4, que suben directo a Supabase Storage con una URL firmada.
+  // `attachFieldsToBody: true` deja tanto el archivo (`.toBuffer()`/
+  // `.filename`) como los campos de texto (`.value`) accesibles en
+  // `request.body`, sin acumular streams sin límite -- ver
+  // apps/api/src/routes/sales-import.ts.
+  await app.register(multipart, {
+    attachFieldsToBody: true,
+    limits: { fileSize: 20 * 1024 * 1024, files: 1 },
+  });
+
   await app.register(healthRoutes);
   await app.register(authRoutes);
   await app.register(meRoutes);
@@ -75,6 +90,7 @@ export async function buildServer(overrides?: Partial<AppConfig>): Promise<Fasti
   await app.register(inventoryRoutes);
   await app.register(shopOpsRoutes);
   await app.register(attachmentsRoutes);
+  await app.register(salesImportRoutes);
 
   return app;
 }

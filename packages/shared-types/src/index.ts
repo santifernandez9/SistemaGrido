@@ -6,3 +6,4 @@ export * from './api.js';
 export * from './catalog.js';
 export * from './inventory.js';
 export * from './shop-ops.js';
+export * from './sales-import.js';

@@ -36,12 +36,17 @@ export function createApiClient({ baseUrl, supabase }: ApiClientOptions) {
     const response = await fetch(`${baseUrl}${path}`, {
       ...init,
       headers: {
-        // Sólo se declara JSON cuando realmente hay body: un POST sin payload
-        // (ej. `api.post('/api/auth/session')`) no debe mandar
-        // `Content-Type: application/json` con el body vacío -- Fastify lo
-        // interpreta como "viene un JSON" y responde 400 antes de ejecutar
-        // la ruta, aunque esta no espere ningún body.
-        ...(init.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        // Sólo se declara JSON cuando realmente hay body Y no es un
+        // `FormData` (Etapa 5: subida de archivos vía `postFormData`) -- un
+        // POST sin payload (ej. `api.post('/api/auth/session')`) no debe
+        // mandar `Content-Type: application/json` con el body vacío
+        // (Fastify lo interpreta como "viene un JSON" y responde 400 antes
+        // de ejecutar la ruta), y un `FormData` necesita que el browser
+        // calcule su propio Content-Type con el boundary -- forzarlo acá lo
+        // rompería.
+        ...(init.body !== undefined && !(init.body instanceof FormData)
+          ? { 'Content-Type': 'application/json' }
+          : {}),
         ...(token ? { Authorization: `Bearer ${token}` } : {}),
         ...init.headers,
       },
@@ -72,6 +77,14 @@ export function createApiClient({ baseUrl, supabase }: ApiClientOptions) {
         method: 'PATCH',
         body: payload !== undefined ? JSON.stringify(payload) : undefined,
       }),
+    /**
+     * Subida de archivos (Etapa 5: importador de ventas). A diferencia de
+     * `post`, NUNCA fuerza `Content-Type: application/json` -- el browser
+     * calcula el boundary de `multipart/form-data` solo a partir del
+     * `FormData`, y forzar un Content-Type manual acá lo rompería.
+     */
+    postFormData: <T>(path: string, formData: FormData) =>
+      request<T>(path, { method: 'POST', body: formData }),
   };
 }
 
