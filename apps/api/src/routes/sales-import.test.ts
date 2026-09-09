@@ -615,6 +615,142 @@ describe('/api/sales-imports', () => {
     );
   });
 
+  // --- Etapa 5.2: consistencia transaccional de alias bajo concurrencia real ---
+
+  /**
+   * F. Reproduce el riesgo TOCTOU descrito en el hardening de Etapa 5.2:
+   *
+   *   1. import PREVIEW_READY, código externo `24` mapeado a Product A (el
+   *      resto de los ~135 códigos restantes también mapeados -- Etapa 5.1
+   *      exige mapeo completo para poder confirmar en absoluto);
+   *   2. arranca la confirmación (POST .../confirm) -- una transacción real
+   *      que, al recorrer las 136 filas creando Sale + movimientos uno por
+   *      uno, tarda varios milisegundos reales (el mismo mecanismo que ya
+   *      demuestran los tests de "confirmaciones CONCURRENTES" de más
+   *      abajo), dando una ventana real para que otra operación se
+   *      intercale;
+   *   3. CONCURRENTEMENTE (mismo `Promise.all`, sin sleeps ni locks
+   *      artificiales de este test) otro flujo remapea el código `24` de
+   *      Product A a Product B vía `POST /api/product-aliases`.
+   *
+   * Qué se verifica (la propiedad de corrección real, no un resultado fijo):
+   * bajo aislamiento `Serializable` (`confirmSalesImport`, Etapa 5.2),
+   * PostgreSQL garantiza que la transacción de confirmación se comporta
+   * como si hubiera corrido en algún orden serial válido respecto del
+   * remapeo -- así que sólo hay DOS desenlaces legítimos, y el test
+   * verifica que SIEMPRE ocurre exactamente uno de los dos, nunca un
+   * estado intermedio/mezclado:
+   *
+   *   (a) La confirmación se serializa ANTES del remapeo: responde 200,
+   *       queda CONFIRMED, y genera una Sale para el artículo 24 apuntando
+   *       a Product A (el valor que leyó, coherente porque lo leyó y lo
+   *       usó dentro de la MISMA transacción) -- el remapeo a B se aplica
+   *       después, sin conflicto, y gobierna las importaciones futuras.
+   *   (b) PostgreSQL detecta que no puede serializar ambas operaciones de
+   *       forma consistente y aborta la confirmación (P2034 -> 409,
+   *       ver `resolveConfirmConflictAfterTransactionConflict`): la
+   *       transacción entera se revierte -- CERO Sale, CERO movimientos,
+   *       CERO auditoría, `SalesImport` sigue PREVIEW_READY -- nunca una
+   *       Sale creada con un alias a mitad de camino entre A y B.
+   *
+   * Lo que NUNCA debe pasar (y es lo que este test verdaderamente
+   * comprueba, sea cual sea el desenlace real de la carrera en esta
+   * corrida): una respuesta 200 sin que TODAS las 136 filas hayan generado
+   * su Sale, o una Sale creada mientras la respuesta HTTP fue 409 -- eso
+   * sería exactamente la "confirmación silenciosa con datos obsoletos"
+   * que la Etapa 5.2 prohíbe.
+   */
+  it('F. remapear un alias concurrentemente con la confirmación nunca deja un estado parcial/torcido', async () => {
+    const productA = await prisma.product.findFirstOrThrow({ where: { organizationId } });
+    const category = await prisma.category.findFirstOrThrow({ where: { organizationId } });
+    const productTypes = await prisma.productType.findMany({ where: { organizationId } });
+    const unitOfMeasure = await prisma.unitOfMeasure.findFirstOrThrow({
+      where: { organizationId, code: 'UNIDAD' },
+    });
+    const productB = await prisma.product.create({
+      data: {
+        organizationId,
+        name: 'Bombon Crocante en Caja x 8 (remapeado B)',
+        categoryId: category.id,
+        productTypeId: productTypes[0]!.id,
+        unitOfMeasureId: unitOfMeasure.id,
+        unitsPerHandlingUnit: 1,
+      },
+    });
+
+    const { importId } = await setupMappedImport(); // artículo 24 -> productA; resto -> genérico.
+
+    asAdmin();
+    async function confirm() {
+      return app.inject({
+        method: 'POST',
+        url: `/api/sales-imports/${importId}/confirm`,
+        headers: adminAuthHeader,
+        payload: { idempotencyKey: 'confirm-vs-remap-race' },
+      });
+    }
+    async function remapTo(productId: string) {
+      return app.inject({
+        method: 'POST',
+        url: '/api/product-aliases',
+        headers: adminAuthHeader,
+        payload: { source: 'MIX_VENTAS', externalCode: '24', productId },
+      });
+    }
+
+    const [confirmRes] = await Promise.all([confirm(), remapTo(productB.id)]);
+
+    const finalImport = await prisma.salesImport.findUniqueOrThrow({ where: { id: importId } });
+    const salesForImport = await prisma.sale.count({
+      where: { organizationId, salesImportId: importId },
+    });
+    const movementsForImport = await prisma.inventoryMovement.count({
+      where: { organizationId, sourceDocumentType: 'SALES_IMPORT', sourceDocumentId: importId },
+    });
+    const auditCount = await prisma.auditLog.count({
+      where: { action: 'SALES_IMPORT_CONFIRMED', entityId: importId },
+    });
+
+    if (confirmRes.statusCode === 200) {
+      // Desenlace (a): se serializó ANTES del remapeo -- coherente y completo.
+      expect(finalImport.status).toBe('CONFIRMED');
+      expect(salesForImport).toBe(136); // TODAS las filas, nunca una confirmación parcial.
+      expect(movementsForImport).toBe(136);
+      expect(auditCount).toBe(1);
+
+      const saleForArticle24 = await prisma.sale.findFirstOrThrow({
+        where: { organizationId, productId: { in: [productA.id, productB.id] } },
+      });
+      // Coherente con AMBOS órdenes seriales válidos: si la transacción de
+      // confirmación leyó el alias antes de que el remapeo committeara, usa
+      // A (y el remapeo a B se aplica después, sin conflicto); si el
+      // remapeo ya había committeado cuando la confirmación tomó su
+      // snapshot, lee y usa B directamente -- ninguno de los dos es un bug,
+      // lo que NUNCA debe pasar es un valor que no sea ni A ni B (ya
+      // descartado por el `where` de arriba) o una confirmación con menos
+      // de 136 Sale (ya verificado arriba).
+      expect([productA.id, productB.id]).toContain(saleForArticle24.productId);
+    } else {
+      // Desenlace (b): PostgreSQL abortó la confirmación por el conflicto de
+      // serialización -- CERO efectos, nunca un estado a medio camino.
+      expect(confirmRes.statusCode).toBe(409);
+      expect(finalImport.status).toBe('PREVIEW_READY');
+      expect(finalImport.confirmedAt).toBeNull();
+      expect(finalImport.confirmIdempotencyKey).toBeNull();
+      expect(salesForImport).toBe(0);
+      expect(movementsForImport).toBe(0);
+      expect(auditCount).toBe(0);
+    }
+
+    // El remapeo en sí (una operación independiente, no transaccionada con
+    // la confirmación) siempre se aplica -- gobierna cualquier confirmación
+    // FUTURA de este código, sea cual haya sido el desenlace de arriba.
+    const finalAlias = await prisma.productAlias.findFirstOrThrow({
+      where: { organizationId, source: 'MIX_VENTAS', externalCode: '24' },
+    });
+    expect(finalAlias.productId).toBe(productB.id);
+  });
+
   // --- Idempotencia de CONFIRMACIÓN ------------------------------------------
 
   it('retry secuencial con la misma clave de confirmación devuelve el mismo resultado sin re-auditar', async () => {

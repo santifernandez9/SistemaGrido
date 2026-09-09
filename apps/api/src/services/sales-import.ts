@@ -36,6 +36,34 @@ const CONFIRM_IDEMPOTENCY_KEY_TARGET = ['organization_id', 'confirm_idempotency_
 /** Tolerancia de reconciliación (sección 13 del prompt) -- redondeo de centavos. */
 const RECONCILIATION_TOLERANCE = new Prisma.Decimal('0.02');
 
+/**
+ * Marca, dentro del `catch` de `confirmSalesImport`, un `ConflictError`
+ * lanzado DENTRO de la transacción por "quedan filas VALID sin mapear"
+ * (Etapa 5.1/5.2) -- se distingue del `ConflictError` genérico de "otra
+ * solicitud ya confirmó esto" (que sí dispara `resolveConfirmConflictAfterRace`)
+ * para no reportar el mensaje equivocado: sin esta distinción, el catch
+ * reconsultaría la fila, la vería sin `confirmIdempotencyKey` (la
+ * transacción entera se revirtió) y respondería "ya fue confirmada con una
+ * clave distinta" -- un mensaje incorrecto para lo que en realidad es
+ * "faltan productos por mapear".
+ */
+class UnmappedProductsConflictError extends ConflictError {}
+
+/**
+ * Etapa 5.2: bajo aislamiento `Serializable` (ver `confirmSalesImport`),
+ * Postgres aborta una de dos transacciones concurrentes cuando detecta que
+ * sus lecturas/escrituras se pisarían de forma inconsistente (ej. una leyó
+ * un `ProductAlias` que la otra modificó antes de que la primera pudiera
+ * terminar) -- Prisma lo reporta como el código `P2034` ("Transaction
+ * failed due to a write conflict or a deadlock"). Es la señal de que
+ * Postgres YA garantizó que ningún efecto se aplicó con datos de alias
+ * obsoletos; la respuesta correcta es un 409 controlado pidiendo
+ * reintentar, nunca un reintento automático silencioso acá adentro.
+ */
+function isTransactionConflictError(err: unknown): boolean {
+  return err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2034';
+}
+
 const salesImportInclude = {
   location: { select: { name: true } },
   createdBy: { select: { displayName: true } },
@@ -104,16 +132,23 @@ function mapSalesImportRow(
   };
 }
 
-/** Resuelve, EN VIVO, códigos externos -> Product a través de ProductAlias
+/**
+ * Resuelve, EN VIVO, códigos externos -> Product a través de ProductAlias
  * (nunca se cachea en la fila -- ver comentario de `SalesImportRow` en el
- * schema). */
+ * schema). Recibe el cliente de Prisma como parámetro (en vez de
+ * `FastifyInstance`) para poder usarse tanto fuera de una transacción
+ * (`fastify.db`, ej. el preview de sólo lectura) como DENTRO de una --
+ * `Prisma.TransactionClient` -- que es exactamente lo que necesita
+ * `confirmSalesImport` (Etapa 5.2, ver más abajo) para que la resolución de
+ * alias forme parte de la misma transacción que sus efectos.
+ */
 async function resolveProductAliases(
-  fastify: FastifyInstance,
+  db: Prisma.TransactionClient,
   organizationId: string,
   articleCodes: string[],
 ): Promise<Map<string, { productId: string; productName: string }>> {
   if (articleCodes.length === 0) return new Map();
-  const aliases = await fastify.db.productAlias.findMany({
+  const aliases = await db.productAlias.findMany({
     where: {
       organizationId,
       source: 'MIX_VENTAS',
@@ -157,6 +192,67 @@ async function resolveConfirmConflictAfterRace(
     return mapSalesImport(winner);
   }
   throw new ConflictError('Esta importación ya fue confirmada con una clave distinta.');
+}
+
+/**
+ * Etapa 5.2: se llama SOLO después de un `P2034` (conflicto de
+ * serialización bajo `Serializable`, ver `isTransactionConflictError`).
+ * A diferencia de `resolveConfirmConflictAfterRace` (que asume que la
+ * colisión fue por REUTILIZAR la misma `confirmIdempotencyKey`), un P2034
+ * tiene TRES causas posibles y hay que distinguirlas reconsultando -- nunca
+ * asumir cuál fue sin mirar qué quedó realmente persistido:
+ *
+ * 1. Dos confirmaciones concurrentes con la MISMA clave (la fila
+ *    `sales_import` es la misma que ambas intentan actualizar bajo
+ *    Serializable -- Postgres puede abortar una con P2034 en vez del
+ *    `updateResult.count === 0` "silencioso" de antes): si lo que quedó
+ *    persistido tiene exactamente nuestra clave+fingerprint, es un retry
+ *    concurrente legítimo -- se devuelve ese resultado, sin re-auditar.
+ * 2. Dos confirmaciones concurrentes con claves DISTINTAS: lo persistido
+ *    tiene una clave distinta a la nuestra -- 409, mismo mensaje que la
+ *    colisión de UNIQUE.
+ * 3. Un conflicto genuino con otro cambio concurrente ajeno a la
+ *    confirmación (ej. un `ProductAlias` remapeado mientras se confirmaba,
+ *    sección 1 del prompt de Etapa 5.2): acá NADIE terminó de confirmar --
+ *    `confirmIdempotencyKey` sigue `null` porque la transacción entera
+ *    (incluida la actualización de estado) se revirtió. Postgres ya
+ *    garantizó que no quedó ningún efecto aplicado con datos obsoletos; se
+ *    informa un 409 controlado pidiendo reintentar, nunca un reintento
+ *    automático acá adentro.
+ */
+async function resolveConfirmConflictAfterTransactionConflict(
+  fastify: FastifyInstance,
+  organizationId: string,
+  salesImportId: string,
+  idempotencyKey: string,
+  fingerprint: string,
+): Promise<SalesImportDto> {
+  const winner = await fastify.db.salesImport.findFirst({
+    where: { id: salesImportId, organizationId },
+    include: salesImportInclude,
+  });
+  if (!winner) {
+    fastify.log.error(
+      { organizationId, salesImportId, idempotencyKey },
+      'Etapa 5.2: conflicto de serialización (P2034) sin import encontrado al reconsultar',
+    );
+    throw new ConflictError(
+      'No se pudo confirmar el resultado de esta importación por una condición de carrera inesperada; reintentá la solicitud.',
+    );
+  }
+  if (
+    winner.confirmIdempotencyKey === idempotencyKey &&
+    winner.confirmIdempotencyFingerprint === fingerprint
+  ) {
+    return mapSalesImport(winner);
+  }
+  if (winner.confirmIdempotencyKey !== null) {
+    throw new ConflictError('Esta importación ya fue confirmada con una clave distinta.');
+  }
+  throw new ConflictError(
+    'No se pudo confirmar por un cambio concurrente relevante (por ejemplo, un alias remapeado ' +
+      'mientras se confirmaba). No se aplicó ningún efecto; volvé a intentar la confirmación.',
+  );
 }
 
 interface UploadSalesImportParams {
@@ -425,7 +521,7 @@ export async function getSalesImportPreview(
 
   const validRows = rows.filter((r) => r.status === 'VALID');
   const aliasMap = await resolveProductAliases(
-    fastify,
+    fastify.db,
     organizationId,
     validRows.map((r) => r.rawArticleCode),
   );
@@ -516,6 +612,25 @@ export async function getSalesImportPreview(
  * -- `confirmIdempotencyKey`/`confirmIdempotencyFingerprint` + UNIQUE +
  * resolución explícita de carrera vía Postgres (UPDATE condicional
  * `status: PREVIEW_READY -> CONFIRMED`), nunca locks en memoria.
+ *
+ * Etapa 5.2 (hardening de concurrencia): la Etapa 5.1 resolvía los alias
+ * EN VIVO pero ANTES de abrir la transacción -- una ventana TOCTOU real:
+ * entre esa lectura y el `INSERT` de `Sale`, otro ADMIN podía remapear un
+ * código externo y la confirmación seguía usando el alias viejo, ya
+ * inconsistente con lo que Postgres tenía persistido. Ahora TODA la
+ * lectura que decide qué se confirma (filas VALID, `ProductAlias`,
+ * `Product` vendidos, `BillOfMaterialItem`, `Product` componente) vive
+ * DENTRO de la misma transacción que escribe sus efectos, bajo aislamiento
+ * `Serializable` -- el más estricto que ofrece PostgreSQL: si una
+ * transacción concurrente modifica un `ProductAlias` que esta transacción
+ * ya leyó (o viceversa) de una forma que rompería la ilusión de ejecución
+ * serial, Postgres aborta una de las dos con un conflicto de
+ * serialización (`P2034` del lado de Prisma) ANTES de que el commit
+ * pudiera dejar un efecto basado en datos obsoletos -- nunca un lock en
+ * memoria, mutex, sleep o reintento artificial: Postgres es la única
+ * fuente de verdad, y la solución es dejar que rechace la transacción
+ * perdedora y devolver un 409 controlado pidiendo reintentar (ver
+ * `isTransactionConflictError`).
  */
 export async function confirmSalesImport(
   fastify: FastifyInstance,
@@ -527,6 +642,10 @@ export async function confirmSalesImport(
   const importRow = await loadSalesImportOrThrow(fastify, organizationId, id);
   const fingerprint = computeConfirmFingerprint(id);
 
+  // Atajo rápido (no la protección real, ver la transacción de abajo): evita
+  // abrir una transacción Serializable -- más cara que una lectura común --
+  // para un retry obviamente idempotente o un estado obviamente no
+  // confirmable.
   if (importRow.confirmIdempotencyKey !== null) {
     if (
       importRow.confirmIdempotencyKey === input.idempotencyKey &&
@@ -547,196 +666,216 @@ export async function confirmSalesImport(
     );
   }
 
-  const validRows = await fastify.db.salesImportRow.findMany({
-    where: { organizationId, salesImportId: id, status: 'VALID' },
-  });
-  const aliasMap = await resolveProductAliases(
-    fastify,
-    organizationId,
-    validRows.map((r) => r.rawArticleCode),
-  );
-  const mappedRows: { row: (typeof validRows)[number]; alias: { productId: string } }[] = [];
-  const unmappedCodes = new Set<string>();
-  for (const row of validRows) {
-    const alias = aliasMap.get(row.rawArticleCode);
-    if (alias) {
-      mappedRows.push({ row, alias });
-    } else {
-      unmappedCodes.add(row.rawArticleCode);
-    }
-  }
-
-  // Etapa 5.1 (hardening): una importación sólo puede confirmarse cuando
-  // TODAS las filas VALID tienen un ProductAlias confirmado -- nunca una
-  // confirmación parcial que deje algunas ventas reales fuera del ledger.
-  // El mapeo se resuelve EN VIVO acá mismo (arriba, `resolveProductAliases`
-  // contra la base de datos actual, nunca contra un preview cacheado), así
-  // que esto también cubre el caso "se abrió el preview completo, pero
-  // alguien cambió/creó un alias antes de confirmar": el backend siempre
-  // decide con el estado actual de Postgres, nunca confía en lo que vio el
-  // frontend. Se corta ACÁ, antes de tocar `$transaction` -- no se
-  // actualiza `SalesImport`, no se crea `Sale` ni movimientos, no se
-  // audita la confirmación.
-  if (unmappedCodes.size > 0) {
-    throw new ConflictError(
-      `No se puede confirmar: hay ${unmappedCodes.size} producto(s) sin mapear ` +
-        `(código${unmappedCodes.size > 1 ? 's' : ''} de artículo: ${[...unmappedCodes].sort().join(', ')}). ` +
-        'Mapeá todos los productos de las filas válidas a un alias antes de confirmar.',
-    );
-  }
-
-  const soldProductIds = [...new Set(mappedRows.map((e) => e.alias.productId))];
-  const soldProducts = await fastify.db.product.findMany({
-    where: { organizationId, id: { in: soldProductIds } },
-    select: { id: true, unitsPerHandlingUnit: true, unitOfMeasureId: true },
-  });
-  const soldProductById = new Map(soldProducts.map((p) => [p.id, p]));
-
-  const bomItems = await fastify.db.billOfMaterialItem.findMany({
-    where: { organizationId, productId: { in: soldProductIds }, active: true },
-  });
-  const bomByProductId = new Map<string, typeof bomItems>();
-  for (const item of bomItems) {
-    const list = bomByProductId.get(item.productId);
-    if (list) list.push(item);
-    else bomByProductId.set(item.productId, [item]);
-  }
-  const componentProductIds = [...new Set(bomItems.map((i) => i.componentProductId))];
-  const componentProducts = await fastify.db.product.findMany({
-    where: { organizationId, id: { in: componentProductIds } },
-    select: { id: true, unitsPerHandlingUnit: true, unitOfMeasureId: true },
-  });
-  const componentProductById = new Map(componentProducts.map((p) => [p.id, p]));
-
   try {
-    return await fastify.db.$transaction(async (tx) => {
-      const updateResult = await tx.salesImport.updateMany({
-        where: { id, organizationId, status: 'PREVIEW_READY' },
-        data: {
-          status: 'CONFIRMED',
-          confirmedById: actor.id,
-          confirmedAt: new Date(),
-          confirmIdempotencyKey: input.idempotencyKey,
-          confirmIdempotencyFingerprint: fingerprint,
-        },
-      });
-      if (updateResult.count === 0) {
-        throw new ConflictError(
-          'Esta importación ya fue confirmada por otra solicitud; volvé a consultarla.',
-        );
-      }
-
-      let salesCreated = 0;
-      let movementsCreated = 0;
-
-      for (const { row, alias } of mappedRows) {
-        const product = soldProductById.get(alias.productId);
-        if (!product) {
-          fastify.log.error(
-            { organizationId, salesImportId: id, productId: alias.productId },
-            'Etapa 5: producto de un alias resuelto no encontrado al confirmar (dato inconsistente)',
+    return await fastify.db.$transaction(
+      async (tx) => {
+        const updateResult = await tx.salesImport.updateMany({
+          where: { id, organizationId, status: 'PREVIEW_READY' },
+          data: {
+            status: 'CONFIRMED',
+            confirmedById: actor.id,
+            confirmedAt: new Date(),
+            confirmIdempotencyKey: input.idempotencyKey,
+            confirmIdempotencyFingerprint: fingerprint,
+          },
+        });
+        if (updateResult.count === 0) {
+          throw new ConflictError(
+            'Esta importación ya fue confirmada por otra solicitud; volvé a consultarla.',
           );
-          continue;
         }
 
-        const quantitySold = new Prisma.Decimal(row.quantity);
-        const enteredQuantity = quantitySold.negated();
-        const conversionFactor = product.unitsPerHandlingUnit;
-        const canonicalQuantity = enteredQuantity.mul(conversionFactor);
-
-        const movement = await tx.inventoryMovement.create({
-          data: {
-            organizationId,
-            locationId: importRow.locationId,
-            productId: alias.productId,
-            movementType: 'SALE',
-            quantity: canonicalQuantity,
-            enteredQuantity,
-            entryUnitOfMeasureId: product.unitOfMeasureId,
-            conversionFactor,
-            occurredAt: importRow.periodEnd,
-            sourceDocumentType: 'SALES_IMPORT',
-            sourceDocumentId: importRow.id,
-            createdById: actor.id,
-          },
+        // Etapa 5.2: TODO lo que decide QUÉ se confirma se lee ACÁ ADENTRO,
+        // con `tx` (nunca `fastify.db`) -- es la única forma de que quede
+        // cubierto por la misma garantía Serializable que las escrituras de
+        // abajo. Repite exactamente la regla de Etapa 5.1 (ninguna fila
+        // VALID sin alias), pero ahora la lectura del alias es parte
+        // indivisible de la misma transacción que crea `Sale`.
+        const validRows = await tx.salesImportRow.findMany({
+          where: { organizationId, salesImportId: id, status: 'VALID' },
         });
-        movementsCreated++;
+        const aliasMap = await resolveProductAliases(
+          tx,
+          organizationId,
+          validRows.map((r) => r.rawArticleCode),
+        );
+        const mappedRows: { row: (typeof validRows)[number]; alias: { productId: string } }[] = [];
+        const unmappedCodes = new Set<string>();
+        for (const row of validRows) {
+          const alias = aliasMap.get(row.rawArticleCode);
+          if (alias) {
+            mappedRows.push({ row, alias });
+          } else {
+            unmappedCodes.add(row.rawArticleCode);
+          }
+        }
+        if (unmappedCodes.size > 0) {
+          throw new UnmappedProductsConflictError(
+            `No se puede confirmar: hay ${unmappedCodes.size} producto(s) sin mapear ` +
+              `(código${unmappedCodes.size > 1 ? 's' : ''} de artículo: ${[...unmappedCodes].sort().join(', ')}). ` +
+              'Mapeá todos los productos de las filas válidas a un alias antes de confirmar.',
+          );
+        }
 
-        const sale = await tx.sale.create({
-          data: {
-            organizationId,
-            locationId: importRow.locationId,
-            salesImportId: id,
-            salesImportRowId: row.id,
-            productId: alias.productId,
-            quantity: quantitySold,
-            amountReal: row.amount,
-            isPromotion: row.isPromotion,
-            isCanje: row.isCanje,
-            occurredAt: importRow.periodEnd,
-            movementId: movement.id,
-            createdById: actor.id,
-          },
+        const soldProductIds = [...new Set(mappedRows.map((e) => e.alias.productId))];
+        const soldProducts = await tx.product.findMany({
+          where: { organizationId, id: { in: soldProductIds } },
+          select: { id: true, unitsPerHandlingUnit: true, unitOfMeasureId: true },
         });
-        salesCreated++;
+        const soldProductById = new Map(soldProducts.map((p) => [p.id, p]));
 
-        const recipe = bomByProductId.get(alias.productId) ?? [];
-        const soldCanonicalMagnitude = canonicalQuantity.abs();
-        for (const bomItem of recipe) {
-          const componentProduct = componentProductById.get(bomItem.componentProductId);
-          if (!componentProduct) {
+        const bomItems = await tx.billOfMaterialItem.findMany({
+          where: { organizationId, productId: { in: soldProductIds }, active: true },
+        });
+        const bomByProductId = new Map<string, typeof bomItems>();
+        for (const item of bomItems) {
+          const list = bomByProductId.get(item.productId);
+          if (list) list.push(item);
+          else bomByProductId.set(item.productId, [item]);
+        }
+        const componentProductIds = [...new Set(bomItems.map((i) => i.componentProductId))];
+        const componentProducts = await tx.product.findMany({
+          where: { organizationId, id: { in: componentProductIds } },
+          select: { id: true, unitsPerHandlingUnit: true, unitOfMeasureId: true },
+        });
+        const componentProductById = new Map(componentProducts.map((p) => [p.id, p]));
+
+        let salesCreated = 0;
+        let movementsCreated = 0;
+
+        for (const { row, alias } of mappedRows) {
+          const product = soldProductById.get(alias.productId);
+          if (!product) {
             fastify.log.error(
-              { organizationId, componentProductId: bomItem.componentProductId },
-              'Etapa 5: componente de BOM no encontrado al confirmar (dato inconsistente)',
+              { organizationId, salesImportId: id, productId: alias.productId },
+              'Etapa 5: producto de un alias resuelto no encontrado al confirmar (dato inconsistente)',
             );
             continue;
           }
-          const componentCanonicalQty = soldCanonicalMagnitude.mul(bomItem.quantityPerUnit);
-          const componentConversionFactor = componentProduct.unitsPerHandlingUnit;
-          const componentEnteredQuantity = componentCanonicalQty
-            .div(componentConversionFactor)
-            .negated();
-          const componentCanonicalSigned = componentEnteredQuantity.mul(componentConversionFactor);
 
-          await tx.inventoryMovement.create({
+          const quantitySold = new Prisma.Decimal(row.quantity);
+          const enteredQuantity = quantitySold.negated();
+          const conversionFactor = product.unitsPerHandlingUnit;
+          const canonicalQuantity = enteredQuantity.mul(conversionFactor);
+
+          const movement = await tx.inventoryMovement.create({
             data: {
               organizationId,
               locationId: importRow.locationId,
-              productId: bomItem.componentProductId,
-              movementType: 'BOM_CONSUMPTION',
-              quantity: componentCanonicalSigned,
-              enteredQuantity: componentEnteredQuantity,
-              entryUnitOfMeasureId: componentProduct.unitOfMeasureId,
-              conversionFactor: componentConversionFactor,
+              productId: alias.productId,
+              movementType: 'SALE',
+              quantity: canonicalQuantity,
+              enteredQuantity,
+              entryUnitOfMeasureId: product.unitOfMeasureId,
+              conversionFactor,
               occurredAt: importRow.periodEnd,
-              sourceDocumentType: 'SALE',
-              sourceDocumentId: sale.id,
+              sourceDocumentType: 'SALES_IMPORT',
+              sourceDocumentId: importRow.id,
               createdById: actor.id,
             },
           });
           movementsCreated++;
+
+          const sale = await tx.sale.create({
+            data: {
+              organizationId,
+              locationId: importRow.locationId,
+              salesImportId: id,
+              salesImportRowId: row.id,
+              productId: alias.productId,
+              quantity: quantitySold,
+              amountReal: row.amount,
+              isPromotion: row.isPromotion,
+              isCanje: row.isCanje,
+              occurredAt: importRow.periodEnd,
+              movementId: movement.id,
+              createdById: actor.id,
+            },
+          });
+          salesCreated++;
+
+          const recipe = bomByProductId.get(alias.productId) ?? [];
+          const soldCanonicalMagnitude = canonicalQuantity.abs();
+          for (const bomItem of recipe) {
+            const componentProduct = componentProductById.get(bomItem.componentProductId);
+            if (!componentProduct) {
+              fastify.log.error(
+                { organizationId, componentProductId: bomItem.componentProductId },
+                'Etapa 5: componente de BOM no encontrado al confirmar (dato inconsistente)',
+              );
+              continue;
+            }
+            const componentCanonicalQty = soldCanonicalMagnitude.mul(bomItem.quantityPerUnit);
+            const componentConversionFactor = componentProduct.unitsPerHandlingUnit;
+            const componentEnteredQuantity = componentCanonicalQty
+              .div(componentConversionFactor)
+              .negated();
+            const componentCanonicalSigned =
+              componentEnteredQuantity.mul(componentConversionFactor);
+
+            await tx.inventoryMovement.create({
+              data: {
+                organizationId,
+                locationId: importRow.locationId,
+                productId: bomItem.componentProductId,
+                movementType: 'BOM_CONSUMPTION',
+                quantity: componentCanonicalSigned,
+                enteredQuantity: componentEnteredQuantity,
+                entryUnitOfMeasureId: componentProduct.unitOfMeasureId,
+                conversionFactor: componentConversionFactor,
+                occurredAt: importRow.periodEnd,
+                sourceDocumentType: 'SALE',
+                sourceDocumentId: sale.id,
+                createdById: actor.id,
+              },
+            });
+            movementsCreated++;
+          }
         }
-      }
 
-      await fastify.audit.logTx(tx, {
-        organizationId,
-        userId: actor.id,
-        roleCode: actor.roleCode,
-        locationId: importRow.locationId,
-        action: 'SALES_IMPORT_CONFIRMED',
-        module: 'SALES_IMPORT',
-        entityType: 'sales_import',
-        entityId: id,
-        afterValue: { salesImportId: id, salesCreated, movementsCreated },
-      });
+        await fastify.audit.logTx(tx, {
+          organizationId,
+          userId: actor.id,
+          roleCode: actor.roleCode,
+          locationId: importRow.locationId,
+          action: 'SALES_IMPORT_CONFIRMED',
+          module: 'SALES_IMPORT',
+          entityType: 'sales_import',
+          entityId: id,
+          afterValue: { salesImportId: id, salesCreated, movementsCreated },
+        });
 
-      const updated = await tx.salesImport.findFirstOrThrow({
-        where: { id, organizationId },
-        include: salesImportInclude,
-      });
-      return mapSalesImport(updated);
-    });
+        const updated = await tx.salesImport.findFirstOrThrow({
+          where: { id, organizationId },
+          include: salesImportInclude,
+        });
+        return mapSalesImport(updated);
+      },
+      // Etapa 5.2: Serializable sólo para ESTA transacción (no se cambió
+      // ningún otro `$transaction` del proyecto) -- es la que necesita la
+      // garantía de que sus lecturas de `ProductAlias`/`Product`/
+      // `BillOfMaterialItem` no puedan quedar pisadas por un cambio
+      // concurrente antes de que sus escrituras confirmen.
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
   } catch (err) {
+    if (err instanceof UnmappedProductsConflictError) {
+      // Nunca es una carrera de confirmación (`resolveConfirmConflictAfterRace`
+      // asume que ganó otra solicitud con una clave distinta) -- acá la
+      // transacción se revirtió entera (incluida la actualización de
+      // estado) porque, en el momento de confirmar, algún código de
+      // artículo seguía sin alias. El mensaje ya es el correcto.
+      throw err;
+    }
+    if (isTransactionConflictError(err)) {
+      return resolveConfirmConflictAfterTransactionConflict(
+        fastify,
+        organizationId,
+        id,
+        input.idempotencyKey,
+        fingerprint,
+      );
+    }
     if (isUniqueConstraintViolationOn(err, CONFIRM_IDEMPOTENCY_KEY_TARGET)) {
       return resolveConfirmConflictAfterRace(
         fastify,

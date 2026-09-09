@@ -1,6 +1,15 @@
 # ETAPA 5 — Importador de Ventas
 
-Versión: 1.1 · Rama: `claude/etapa-5-importador-ventas`
+Versión: 1.2 · Rama: `claude/etapa-5-importador-ventas`
+
+> **Actualización — Etapa 5.2 (hardening: consistencia transaccional de alias bajo
+> concurrencia real).** La Etapa 5.1 resolvía los alias en vivo, pero ANTES de abrir la
+> transacción de confirmación -- quedaba una ventana TOCTOU real entre esa lectura y el
+> `INSERT` de `Sale`. Corregido: toda la lectura que decide qué se confirma (filas
+> `VALID`, `ProductAlias`, `Product` vendidos, `BillOfMaterialItem`, `Product`
+> componente) ahora vive DENTRO de la misma transacción que escribe sus efectos, bajo
+> aislamiento `Serializable` -- el más estricto de PostgreSQL. Ver sección 18 más abajo
+> para el detalle completo.
 
 > **Actualización — Etapa 5.1 (hardening: confirmación sólo con mapeo completo).**
 > Auditoría posterior detectó que `confirmSalesImport` construía `Sale`/`SALE`/
@@ -294,3 +303,77 @@ depósito, remitos, compras/facturas, FIFO, transporte, IA/predicciones, RLS rea
 multi-organización comercial, reportes avanzados. Nada de Etapa 1-4.1 (conteo, baja de lata,
 merma, gasto variable, sin stock, catálogo, login/auth) se modificó — sólo se agregaron
 tablas/rutas/servicios nuevos.
+
+## 18. Etapa 5.2 — Consistencia transaccional de alias
+
+**La ventana TOCTOU.** Antes de esta corrección, `confirmSalesImport` resolvía los alias
+"en vivo" (Etapa 5.1) pero en una serie de lecturas (`SalesImportRow`, `ProductAlias`,
+`Product`, `BillOfMaterialItem`) hechas con `fastify.db` -- es decir, **fuera** de
+cualquier transacción -- y recién DESPUÉS abría el `$transaction` que escribía
+`Sale`/`SALE`/`BOM_CONSUMPTION`. Entre esa lectura y el `INSERT` final de `Sale` había una
+ventana real: si otro ADMIN remapeaba un `ProductAlias` en ese instante, la confirmación
+seguía usando el valor que había leído antes de abrir la transacción, sin ninguna relación
+con las garantías transaccionales de PostgreSQL -- ni siquiera una relación de "antes/después"
+coherente, porque esas 5 lecturas ni siquiera eran atómicas entre sí.
+
+**Cómo quedó cerrada.** Toda la lectura que decide QUÉ se confirma ahora vive dentro de la
+MISMA transacción que escribe los efectos (`apps/api/src/services/sales-import.ts`,
+`confirmSalesImport`): las filas `VALID`, la resolución de `ProductAlias` (vía
+`resolveProductAliases`, que ahora recibe el cliente de Prisma como parámetro -- `tx` acá,
+`fastify.db` en el preview de sólo lectura), los `Product` vendidos, las
+`BillOfMaterialItem` activas y sus `Product` componente, se leen todas con `tx` --
+nunca con `fastify.db` -- entre el `UPDATE` condicional (`PREVIEW_READY -> CONFIRMED`) y
+los `INSERT` de `Sale`/`InventoryMovement`. La regla de Etapa 5.1 (ninguna fila `VALID` sin
+alias) se revalida ahí mismo, contra esa misma lectura transaccional.
+
+**Aislamiento usado y por qué.** La transacción de `confirmSalesImport` corre con
+`isolationLevel: Prisma.TransactionIsolationLevel.Serializable` -- el nivel más estricto
+que ofrece PostgreSQL, aplicado **únicamente a esta transacción** (ningún otro
+`$transaction` del proyecto cambió). Se eligió Serializable, en vez de locks explícitos
+(`SELECT ... FOR UPDATE`) sobre los alias, porque es la solución que Prisma/PostgreSQL
+ofrecen de fábrica para exactamente este problema -- "que un conjunto de lecturas y
+escrituras se comporte como si hubiera corrido en algún orden serial válido, sin locks
+manuales que mantener" -- y porque el propio hardening pedía preferir la opción más simple
+que preserve la garantía real. Bajo Serializable, si una transacción concurrente modifica
+una fila que esta transacción ya leyó (o viceversa) de una forma que rompería esa ilusión de
+ejecución serial, PostgreSQL aborta una de las dos con un conflicto de serialización, que
+Prisma expone como el código `P2034` ("Transaction failed due to a write conflict or a
+deadlock").
+
+**Cómo se maneja el `P2034`.** Se agregó `resolveConfirmConflictAfterTransactionConflict`,
+que reconsulta el `SalesImport` después de un `P2034` y distingue tres causas (nunca se
+asume cuál fue sin mirar qué quedó realmente persistido):
+
+1. **Dos confirmaciones concurrentes con la MISMA clave** (ambas transacciones intentan
+   actualizar la misma fila `sales_import` bajo Serializable -- Postgres puede abortar una
+   con `P2034` en vez del `updateResult.count === 0` "silencioso" que bastaba bajo Read
+   Committed): si lo persistido tiene nuestra clave+fingerprint exactos, es un retry
+   concurrente legítimo -- se devuelve ese resultado, sin re-auditar (se detectó este caso
+   como regresión real al escribir este hardening: el test "dos confirmaciones concurrentes
+   con la misma clave" empezó a fallar con 409 hasta agregar esta rama).
+2. **Dos confirmaciones concurrentes con claves DISTINTAS**: lo persistido tiene una clave
+   distinta a la nuestra -- 409, mismo mensaje que la colisión de UNIQUE ya existente.
+3. **Un conflicto genuino ajeno a la confirmación** (ej. un `ProductAlias` remapeado
+   mientras se confirmaba): nadie terminó de confirmar -- `confirmIdempotencyKey` sigue
+   `null` porque la transacción entera se revirtió. 409 controlado pidiendo reintentar,
+   nunca un reintento automático adentro del servicio.
+
+**Cómo se garantiza que Sale/SALE/BOM usan el mismo estado coherente.** Por construcción:
+`aliasMap`, `soldProducts`, `bomItems` y `componentProducts` se calculan a partir de
+lecturas hechas con el mismo `tx`, y los `Sale`/`InventoryMovement` que se crean a
+continuación usan exclusivamente esos valores ya leídos -- nunca se vuelve a consultar
+`fastify.db` a mitad de la transacción. Si PostgreSQL permite que la transacción llegue a
+confirmar, la garantía Serializable certifica que esa combinación de lecturas+escrituras es
+equivalente a algún orden serial válido frente a cualquier transacción concurrente
+(incluido un remapeo de alias) -- nunca una mezcla "a medio camino" entre el valor viejo y
+el nuevo.
+
+**Test agregado** (`apps/api/src/routes/sales-import.test.ts`, caso F): reproduce el
+escenario mínimo pedido -- artículo `24` mapeado a `Product A`; arranca la confirmación
+(una transacción real de ~136 filas, con duración real de varios milisegundos); concurrentemente
+(mismo `Promise.all`, sin sleeps) se remapea `24` a `Product B` vía la API real de alias.
+No asume un ganador fijo (la interleaving real de PostgreSQL decide) -- verifica la
+propiedad de corrección que debe cumplirse siempre: o la confirmación queda `CONFIRMED` con
+las 136 `Sale` completas (usando A o B, lo que sea que la transacción haya leído
+coherentemente), o queda `PREVIEW_READY` con CERO `Sale`/movimientos/auditoría -- nunca un
+estado intermedio.
