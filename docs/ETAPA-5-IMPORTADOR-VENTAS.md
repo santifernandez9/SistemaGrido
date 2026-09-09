@@ -1,6 +1,20 @@
 # ETAPA 5 — Importador de Ventas
 
-Versión: 1.0 · Rama: `claude/etapa-5-importador-ventas`
+Versión: 1.1 · Rama: `claude/etapa-5-importador-ventas`
+
+> **Actualización — Etapa 5.1 (hardening: confirmación sólo con mapeo completo).**
+> Auditoría posterior detectó que `confirmSalesImport` construía `Sale`/`SALE`/
+> `BOM_CONSUMPTION` únicamente con las filas VALID que ya tenían `ProductAlias`,
+> permitiendo confirmar un import con filas mapeadas parcialmente -- las ventas de los
+> códigos sin alias quedaban silenciosamente fuera del ledger. Corregido: una importación
+> sólo puede confirmarse cuando TODAS sus filas `VALID` tienen alias. La protección real
+> está en el backend (`apps/api/src/services/sales-import.ts`, `confirmSalesImport`),
+> que resuelve los alias EN VIVO contra la base de datos actual inmediatamente antes de
+> tocar `$transaction` -- si queda algún código sin mapear, corta ahí mismo con `409
+CONFLICT` sin modificar `SalesImport`, sin crear `Sale`/movimientos, sin auditar. El
+> preview (`getSalesImportPreview`) ajustó `canConfirm` para reflejar la misma regla:
+> `status === 'PREVIEW_READY' && !hasUnmappedProducts`. No hubo cambios de modelo ni
+> migración nueva -- es una corrección de lógica de servicio. Ver sección 5 más abajo.
 
 ## 1. Archivo real elegido y por qué
 

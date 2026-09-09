@@ -214,7 +214,7 @@ describe('/api/sales-imports', () => {
 
   // --- Preview (nunca toca stock) ------------------------------------------
 
-  it('el preview muestra productos sin mapear y nunca crea Sale ni movimientos', async () => {
+  it('el preview muestra productos sin mapear, bloquea canConfirm y nunca crea Sale ni movimientos', async () => {
     const upload = await uploadFixture();
     const id = JSON.parse(upload.payload).data.id;
 
@@ -227,7 +227,9 @@ describe('/api/sales-imports', () => {
     expect(res.statusCode).toBe(200);
     const body = JSON.parse(res.payload);
     expect(body.data.hasUnmappedProducts).toBe(true);
-    expect(body.data.canConfirm).toBe(true);
+    // Etapa 5.1: con productos sin mapear, canConfirm es SIEMPRE false, aunque
+    // el status siga siendo PREVIEW_READY -- ver test B más abajo.
+    expect(body.data.canConfirm).toBe(false);
     expect(body.data.rows).toHaveLength(136);
 
     expect(await prisma.sale.count()).toBe(0);
@@ -281,10 +283,56 @@ describe('/api/sales-imports', () => {
 
   // --- Confirmación, Canje, BOM, stock negativo ------------------------------
 
+  /**
+   * Sube el archivo real y mapea TODAS las filas VALID a un producto (Etapa
+   * 5.1: una importación con cualquier fila VALID sin alias no puede
+   * confirmarse -- ver sección "confirmación bloqueada por productos sin
+   * mapear" más abajo). El artículo `24` (el que usan las aserciones de
+   * Canje/SALE/BOM) se mapea explícitamente vía la API al `product` de
+   * `beforeEach`; el resto de los ~134 códigos restantes se mapean en bloque
+   * a un producto "genérico" vía `createMany` directo (más rápido que 134
+   * llamadas HTTP, y esos códigos no son el foco de estos tests -- ya están
+   * cubiertos por los tests de alias dedicados de arriba).
+   */
   async function setupMappedImport() {
     const product = await prisma.product.findFirstOrThrow({ where: { organizationId } });
+    const admin = await prisma.appUser.findFirstOrThrow({
+      where: { organizationId, email: 'admin-sales@test.com' },
+    });
+    const category = await prisma.category.findFirstOrThrow({ where: { organizationId } });
+    const productTypes = await prisma.productType.findMany({ where: { organizationId } });
+    const unitOfMeasure = await prisma.unitOfMeasure.findFirstOrThrow({
+      where: { organizationId, code: 'UNIDAD' },
+    });
+    const genericProduct = await prisma.product.create({
+      data: {
+        organizationId,
+        name: 'Producto genérico (resto del Mix de Ventas)',
+        categoryId: category.id,
+        productTypeId: productTypes[0]!.id,
+        unitOfMeasureId: unitOfMeasure.id,
+        unitsPerHandlingUnit: 1,
+      },
+    });
+
     const upload = await uploadFixture();
     const importId = JSON.parse(upload.payload).data.id;
+
+    const validRows = await prisma.salesImportRow.findMany({
+      where: { organizationId, salesImportId: importId, status: 'VALID' },
+      select: { rawArticleCode: true },
+      distinct: ['rawArticleCode'],
+    });
+    const restCodes = validRows.map((r) => r.rawArticleCode).filter((code) => code !== '24');
+    await prisma.productAlias.createMany({
+      data: restCodes.map((externalCode) => ({
+        organizationId,
+        source: 'MIX_VENTAS' as const,
+        externalCode,
+        productId: genericProduct.id,
+        confirmedById: admin.id,
+      })),
+    });
 
     asAdmin();
     await app.inject({
@@ -293,7 +341,7 @@ describe('/api/sales-imports', () => {
       headers: adminAuthHeader,
       payload: { source: 'MIX_VENTAS', externalCode: '24', productId: product.id },
     });
-    return { importId, productId: product.id };
+    return { importId, productId: product.id, genericProductId: genericProduct.id };
   }
 
   it('confirmar genera Sale + movimiento SALE sólo para las filas mapeadas, usa el importe real y permite stock negativo', async () => {
@@ -326,10 +374,11 @@ describe('/api/sales-imports', () => {
     // No debe generarse ningún movimiento WASTE por el Canje -- es una venta real.
     expect(await prisma.inventoryMovement.count({ where: { movementType: 'WASTE' } })).toBe(0);
 
-    // Sólo se creó Sale para el artículo mapeado (24) -- el resto de las 134
-    // filas válidas quedaron sin mapear y NUNCA impactaron stock.
-    expect(await prisma.sale.count()).toBe(2);
-    expect(await prisma.inventoryMovement.count({ where: { movementType: 'SALE' } })).toBe(2);
+    // Etapa 5.1: la importación sólo pudo confirmarse porque TODAS las 136
+    // filas VALID quedaron mapeadas (ver `setupMappedImport`) -- se generó
+    // una Sale + un movimiento SALE por cada una, ninguna quedó afuera.
+    expect(await prisma.sale.count()).toBe(136);
+    expect(await prisma.inventoryMovement.count({ where: { movementType: 'SALE' } })).toBe(136);
 
     // Stock negativo permitido: nunca hubo INITIAL_STOCK para este producto,
     // así que el saldo queda negativo -- la confirmación igual tuvo éxito (arriba).
@@ -390,6 +439,180 @@ describe('/api/sales-imports', () => {
     for (const m of bomMovements) {
       expect(saleIds.has(m.sourceDocumentId!)).toBe(true);
     }
+  });
+
+  // --- Confirmación bloqueada por productos sin mapear (Etapa 5.1) -----------
+
+  /** Mapea (vía `createMany` directo) todos los códigos VALID del import a un
+   * producto genérico, salvo los listados en `exceptCodes`. */
+  async function mapAllValidCodesExcept(importId: string, exceptCodes: string[]) {
+    const admin = await prisma.appUser.findFirstOrThrow({
+      where: { organizationId, email: 'admin-sales@test.com' },
+    });
+    const category = await prisma.category.findFirstOrThrow({ where: { organizationId } });
+    const productTypes = await prisma.productType.findMany({ where: { organizationId } });
+    const unitOfMeasure = await prisma.unitOfMeasure.findFirstOrThrow({
+      where: { organizationId, code: 'UNIDAD' },
+    });
+    const genericProduct = await prisma.product.create({
+      data: {
+        organizationId,
+        name: `Producto genérico ${Date.now()}`,
+        categoryId: category.id,
+        productTypeId: productTypes[0]!.id,
+        unitOfMeasureId: unitOfMeasure.id,
+        unitsPerHandlingUnit: 1,
+      },
+    });
+    const validRows = await prisma.salesImportRow.findMany({
+      where: { organizationId, salesImportId: importId, status: 'VALID' },
+      select: { rawArticleCode: true },
+      distinct: ['rawArticleCode'],
+    });
+    const codesToMap = validRows
+      .map((r) => r.rawArticleCode)
+      .filter((code) => !exceptCodes.includes(code));
+    await prisma.productAlias.createMany({
+      data: codesToMap.map((externalCode) => ({
+        organizationId,
+        source: 'MIX_VENTAS' as const,
+        externalCode,
+        productId: genericProduct.id,
+        confirmedById: admin.id,
+      })),
+    });
+  }
+
+  // A. Preview completamente mapeado.
+  it('A. preview con todas las filas VALID mapeadas: hasUnmappedProducts=false, canConfirm=true', async () => {
+    const { importId } = await setupMappedImport();
+    asAdmin();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sales-imports/${importId}`,
+      headers: adminAuthHeader,
+    });
+    const body = JSON.parse(res.payload);
+    expect(body.data.hasUnmappedProducts).toBe(false);
+    expect(body.data.canConfirm).toBe(true);
+  });
+
+  // B. Preview con un único producto sin mapear.
+  it('B. preview con un producto sin mapear: hasUnmappedProducts=true, canConfirm=false', async () => {
+    const upload = await uploadFixture();
+    const importId = JSON.parse(upload.payload).data.id;
+    await mapAllValidCodesExcept(importId, ['24']); // deja SÓLO el artículo 24 sin mapear.
+
+    asAdmin();
+    const res = await app.inject({
+      method: 'GET',
+      url: `/api/sales-imports/${importId}`,
+      headers: adminAuthHeader,
+    });
+    const body = JSON.parse(res.payload);
+    expect(body.data.hasUnmappedProducts).toBe(true);
+    expect(body.data.unmappedCodes).toHaveLength(1);
+    expect(body.data.unmappedCodes[0].rawArticleCode).toBe('24');
+    expect(body.data.canConfirm).toBe(false);
+  });
+
+  // C. Confirmación directa (sin depender del frontend) con un producto sin mapear.
+  it('C. confirmar directamente con un producto sin mapear devuelve 409 sin ningún efecto', async () => {
+    const upload = await uploadFixture();
+    const importId = JSON.parse(upload.payload).data.id;
+    await mapAllValidCodesExcept(importId, ['24']);
+
+    asAdmin();
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/sales-imports/${importId}/confirm`,
+      headers: adminAuthHeader,
+      payload: { idempotencyKey: 'blocked-confirm-1' },
+    });
+    expect(res.statusCode).toBe(409);
+    expect(JSON.parse(res.payload).error.message).toMatch(/sin mapear/i);
+
+    const importAfter = await prisma.salesImport.findUniqueOrThrow({ where: { id: importId } });
+    expect(importAfter.status).toBe('PREVIEW_READY');
+    expect(importAfter.confirmedAt).toBeNull();
+    expect(importAfter.confirmIdempotencyKey).toBeNull();
+    expect(await prisma.sale.count({ where: { organizationId, salesImportId: importId } })).toBe(0);
+    expect(
+      await prisma.inventoryMovement.count({
+        where: { organizationId, sourceDocumentType: 'SALES_IMPORT', sourceDocumentId: importId },
+      }),
+    ).toBe(0);
+    expect(
+      await prisma.inventoryMovement.count({ where: { movementType: 'BOM_CONSUMPTION' } }),
+    ).toBe(0);
+    expect(await prisma.auditLog.count({ where: { action: 'SALES_IMPORT_CONFIRMED' } })).toBe(0);
+  });
+
+  // D. Varios productos sin mapear -- misma protección, sin confirmación parcial.
+  it('D. varios productos sin mapear: misma protección, ningún efecto parcial', async () => {
+    // Sin mapear NADA: los ~135 códigos distintos quedan todos sin alias.
+    const upload = await uploadFixture();
+    const importId = JSON.parse(upload.payload).data.id;
+
+    asAdmin();
+    const res = await app.inject({
+      method: 'POST',
+      url: `/api/sales-imports/${importId}/confirm`,
+      headers: adminAuthHeader,
+      payload: { idempotencyKey: 'blocked-confirm-2' },
+    });
+    expect(res.statusCode).toBe(409);
+
+    const importAfter = await prisma.salesImport.findUniqueOrThrow({ where: { id: importId } });
+    expect(importAfter.status).toBe('PREVIEW_READY');
+    expect(await prisma.sale.count({ where: { organizationId, salesImportId: importId } })).toBe(0);
+    expect(
+      await prisma.inventoryMovement.count({
+        where: { organizationId, sourceDocumentType: 'SALES_IMPORT', sourceDocumentId: importId },
+      }),
+    ).toBe(0);
+    expect(await prisma.auditLog.count({ where: { action: 'SALES_IMPORT_CONFIRMED' } })).toBe(0);
+  });
+
+  // E. Alias resueltos DESPUÉS del preview inicial -- el backend siempre
+  // decide con el estado actual de la base, nunca con lo que vio el preview
+  // anterior (protección TOCTOU, sección 6 del prompt de hardening).
+  it('E. mapear los códigos restantes después del preview inicial habilita la confirmación completa', async () => {
+    const upload = await uploadFixture();
+    const importId = JSON.parse(upload.payload).data.id;
+
+    asAdmin();
+    const initialPreview = await app.inject({
+      method: 'GET',
+      url: `/api/sales-imports/${importId}`,
+      headers: adminAuthHeader,
+    });
+    expect(JSON.parse(initialPreview.payload).data.hasUnmappedProducts).toBe(true);
+
+    // Mapea TODO (incluido el 24) directamente en base, simulando que el
+    // ADMIN terminó de mapear todos los códigos sin mapear del preview.
+    await mapAllValidCodesExcept(importId, []);
+
+    const secondPreview = await app.inject({
+      method: 'GET',
+      url: `/api/sales-imports/${importId}`,
+      headers: adminAuthHeader,
+    });
+    const secondBody = JSON.parse(secondPreview.payload);
+    expect(secondBody.data.hasUnmappedProducts).toBe(false);
+    expect(secondBody.data.canConfirm).toBe(true);
+
+    const confirmRes = await app.inject({
+      method: 'POST',
+      url: `/api/sales-imports/${importId}/confirm`,
+      headers: adminAuthHeader,
+      payload: { idempotencyKey: 'confirm-after-mapping' },
+    });
+    expect(confirmRes.statusCode).toBe(200);
+    expect(JSON.parse(confirmRes.payload).data.status).toBe('CONFIRMED');
+    expect(await prisma.sale.count({ where: { organizationId, salesImportId: importId } })).toBe(
+      136,
+    );
   });
 
   // --- Idempotencia de CONFIRMACIÓN ------------------------------------------

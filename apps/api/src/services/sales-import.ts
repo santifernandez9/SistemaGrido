@@ -484,6 +484,8 @@ export async function getSalesImportPreview(
     .flat()
     .sort((a, b) => a - b);
 
+  const hasUnmappedProducts = unmappedByCode.size > 0;
+
   return {
     import: mapSalesImport(importRow),
     rows: rowDtos,
@@ -493,9 +495,13 @@ export async function getSalesImportPreview(
     unmappedCodes: [...unmappedByCode.values()].sort((a, b) =>
       a.rawDescription.localeCompare(b.rawDescription),
     ),
-    hasUnmappedProducts: unmappedByCode.size > 0,
+    hasUnmappedProducts,
     potentialDuplicateRowNumbers,
-    canConfirm: importRow.status === 'PREVIEW_READY',
+    // Etapa 5.1: nunca alcanza con `status === 'PREVIEW_READY'` -- una
+    // importación con filas válidas sin mapear no puede confirmarse aunque
+    // el estado siga siendo PREVIEW_READY (ver `confirmSalesImport`, que
+    // aplica exactamente esta misma regla como fuente de verdad real).
+    canConfirm: importRow.status === 'PREVIEW_READY' && !hasUnmappedProducts,
   };
 }
 
@@ -550,9 +556,33 @@ export async function confirmSalesImport(
     validRows.map((r) => r.rawArticleCode),
   );
   const mappedRows: { row: (typeof validRows)[number]; alias: { productId: string } }[] = [];
+  const unmappedCodes = new Set<string>();
   for (const row of validRows) {
     const alias = aliasMap.get(row.rawArticleCode);
-    if (alias) mappedRows.push({ row, alias });
+    if (alias) {
+      mappedRows.push({ row, alias });
+    } else {
+      unmappedCodes.add(row.rawArticleCode);
+    }
+  }
+
+  // Etapa 5.1 (hardening): una importación sólo puede confirmarse cuando
+  // TODAS las filas VALID tienen un ProductAlias confirmado -- nunca una
+  // confirmación parcial que deje algunas ventas reales fuera del ledger.
+  // El mapeo se resuelve EN VIVO acá mismo (arriba, `resolveProductAliases`
+  // contra la base de datos actual, nunca contra un preview cacheado), así
+  // que esto también cubre el caso "se abrió el preview completo, pero
+  // alguien cambió/creó un alias antes de confirmar": el backend siempre
+  // decide con el estado actual de Postgres, nunca confía en lo que vio el
+  // frontend. Se corta ACÁ, antes de tocar `$transaction` -- no se
+  // actualiza `SalesImport`, no se crea `Sale` ni movimientos, no se
+  // audita la confirmación.
+  if (unmappedCodes.size > 0) {
+    throw new ConflictError(
+      `No se puede confirmar: hay ${unmappedCodes.size} producto(s) sin mapear ` +
+        `(código${unmappedCodes.size > 1 ? 's' : ''} de artículo: ${[...unmappedCodes].sort().join(', ')}). ` +
+        'Mapeá todos los productos de las filas válidas a un alias antes de confirmar.',
+    );
   }
 
   const soldProductIds = [...new Set(mappedRows.map((e) => e.alias.productId))];

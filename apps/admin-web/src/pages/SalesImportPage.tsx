@@ -438,9 +438,20 @@ function SalesImportDetail({ importId, products, onClose, onChanged }: SalesImpo
         </p>
       )}
 
+      {preview.import.status === 'PREVIEW_READY' && preview.hasUnmappedProducts && (
+        <p className="muted">
+          Todavía hay productos sin mapear -- mapealos arriba antes de poder confirmar. Una
+          importación no puede confirmarse parcialmente.
+        </p>
+      )}
+
       <div className="form-actions">
-        {preview.canConfirm && (
-          <button type="button" onClick={() => void handleConfirm()} disabled={confirming}>
+        {preview.import.status === 'PREVIEW_READY' && (
+          <button
+            type="button"
+            onClick={() => void handleConfirm()}
+            disabled={confirming || !preview.canConfirm}
+          >
             {confirming ? 'Confirmando...' : 'Confirmar importación'}
           </button>
         )}
