@@ -62,25 +62,27 @@ model Organization {
   timezone  String   @default("America/Argentina/Cordoba")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  locations           Location[]
-  users               AppUser[]
-  auditLogs           AuditLog[]
-  categories          Category[]
-  productTypes        ProductType[]
-  unitsOfMeasure      UnitOfMeasure[]
-  flavors             Flavor[]
-  products            Product[]
-  inventoryMovements  InventoryMovement[]
-  inventoryCounts     InventoryCount[]
-  inventoryCountItems InventoryCountItem[]
-  wastes              Waste[]
-  variableExpenses    VariableExpense[]
-  stockoutEvents      StockoutEvent[]
-  salesImports        SalesImport[]
-  salesImportRows     SalesImportRow[]
-  sales               Sale[]
-  productAliases      ProductAlias[]
-  billOfMaterialItems BillOfMaterialItem[]
+  locations              Location[]
+  users                  AppUser[]
+  auditLogs              AuditLog[]
+  categories             Category[]
+  productTypes           ProductType[]
+  unitsOfMeasure         UnitOfMeasure[]
+  flavors                Flavor[]
+  products               Product[]
+  inventoryMovements     InventoryMovement[]
+  inventoryCounts        InventoryCount[]
+  inventoryCountItems    InventoryCountItem[]
+  wastes                 Waste[]
+  variableExpenses       VariableExpense[]
+  stockoutEvents         StockoutEvent[]
+  salesImports           SalesImport[]
+  salesImportRows        SalesImportRow[]
+  sales                  Sale[]
+  productAliases         ProductAlias[]
+  billOfMaterialItems    BillOfMaterialItem[]
+  weeklyClosings         WeeklyClosing[]
+  inventorySnapshotItems InventorySnapshotItem[]
 
   @@map("organization")
 }
@@ -93,15 +95,17 @@ model Location {
   active         Boolean      @default(true)
   createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  users              AppUser[]
-  auditLogs          AuditLog[]
-  inventoryMovements InventoryMovement[]
-  inventoryCounts    InventoryCount[]
-  variableExpenses   VariableExpense[]
-  stockoutEvents     StockoutEvent[]
-  salesImports       SalesImport[]
-  sales              Sale[]
+  organization           Organization            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  users                  AppUser[]
+  auditLogs              AuditLog[]
+  inventoryMovements     InventoryMovement[]
+  inventoryCounts        InventoryCount[]
+  variableExpenses       VariableExpense[]
+  stockoutEvents         StockoutEvent[]
+  salesImports           SalesImport[]
+  sales                  Sale[]
+  weeklyClosings         WeeklyClosing[]
+  inventorySnapshotItems InventorySnapshotItem[]
 
   @@unique([organizationId, name])
   /// Habilita FKs compuestas (organizationId, locationId) desde AppUser,
@@ -145,8 +149,8 @@ model AppUser {
   createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  organization            Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  role                    Role                @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  organization                  Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  role                          Role                @relation(fields: [roleId], references: [id], onDelete: Restrict)
   /// FK compuesta (organizationId, defaultLocationId) -> Location(organizationId, id):
   /// pendiente detectado en Etapa 2.1 (docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md,
   /// sección 14), corregido acá porque Etapa 3 ya necesita tocar AppUser/Location
@@ -157,19 +161,27 @@ model AppUser {
   /// Prisma lo señala como advertencia de esquema inválido. `Restrict` es
   /// coherente con el resto del esquema y con que `Location` nunca se borra
   /// físicamente (baja lógica vía `active`, Etapa 2).
-  defaultLocation         Location?           @relation(fields: [organizationId, defaultLocationId], references: [organizationId, id], onDelete: Restrict)
-  auditLogs               AuditLog[]
-  inventoryMovements      InventoryMovement[]
-  inventoryCounts         InventoryCount[]
-  variableExpenses        VariableExpense[]
-  stockoutEvents          StockoutEvent[]
+  defaultLocation               Location?           @relation(fields: [organizationId, defaultLocationId], references: [organizationId, id], onDelete: Restrict)
+  auditLogs                     AuditLog[]
+  inventoryMovements            InventoryMovement[]
+  inventoryCounts               InventoryCount[]
+  variableExpenses              VariableExpense[]
+  stockoutEvents                StockoutEvent[]
   /// Etapa 5 -- dos relaciones nombradas hacia AppUser porque un import
   /// distingue quién lo subió de quién lo confirmó (pueden ser personas
   /// distintas).
-  salesImportsCreated     SalesImport[]       @relation("SalesImportCreatedBy")
-  salesImportsConfirmed   SalesImport[]       @relation("SalesImportConfirmedBy")
-  sales                   Sale[]
-  productAliasesConfirmed ProductAlias[]
+  salesImportsCreated           SalesImport[]       @relation("SalesImportCreatedBy")
+  salesImportsConfirmed         SalesImport[]       @relation("SalesImportConfirmedBy")
+  sales                         Sale[]
+  productAliasesConfirmed       ProductAlias[]
+  /// Etapa 6 -- cuatro relaciones nombradas: quien preparó/creó el cierre,
+  /// quien confirmó haber revisado el checklist, quien lo cerró
+  /// definitivamente y quien lo reabrió pueden ser personas distintas
+  /// (igual criterio que SalesImportCreatedBy/ConfirmedBy).
+  weeklyClosingsCreated         WeeklyClosing[]     @relation("WeeklyClosingCreatedBy")
+  weeklyClosingsReviewConfirmed WeeklyClosing[]     @relation("WeeklyClosingReviewConfirmedBy")
+  weeklyClosingsClosed          WeeklyClosing[]     @relation("WeeklyClosingClosedBy")
+  weeklyClosingsReopened        WeeklyClosing[]     @relation("WeeklyClosingReopenedBy")
 
   /// Habilita FKs compuestas (organizationId, userId) desde AuditLog e
   /// InventoryMovement (createdBy) — Etapa 3.
@@ -378,27 +390,28 @@ model Product {
   createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  organization           Organization            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   /// FKs compuestas (organizationId, xId) -> Master(organizationId, id) en las
   /// cuatro relaciones de abajo: garantizan en PostgreSQL que un producto no
   /// pueda referenciar una categoría/tipo/unidad/sabor de otra organización,
   /// además de la validación ya existente en el backend (Etapa 2.1 — ver
   /// docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md). flavorId es nullable:
   /// Postgres no exige la FK cuando es NULL (producto sin sabor).
-  category            Category             @relation(fields: [organizationId, categoryId], references: [organizationId, id], onDelete: Restrict)
-  productType         ProductType          @relation(fields: [organizationId, productTypeId], references: [organizationId, id], onDelete: Restrict)
-  unitOfMeasure       UnitOfMeasure        @relation(fields: [organizationId, unitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
-  flavor              Flavor?              @relation(fields: [organizationId, flavorId], references: [organizationId, id], onDelete: Restrict)
-  inventoryMovements  InventoryMovement[]
-  inventoryCountItems InventoryCountItem[]
-  stockoutEvents      StockoutEvent[]
-  sales               Sale[]
-  productAliases      ProductAlias[]
+  category               Category                @relation(fields: [organizationId, categoryId], references: [organizationId, id], onDelete: Restrict)
+  productType            ProductType             @relation(fields: [organizationId, productTypeId], references: [organizationId, id], onDelete: Restrict)
+  unitOfMeasure          UnitOfMeasure           @relation(fields: [organizationId, unitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
+  flavor                 Flavor?                 @relation(fields: [organizationId, flavorId], references: [organizationId, id], onDelete: Restrict)
+  inventoryMovements     InventoryMovement[]
+  inventoryCountItems    InventoryCountItem[]
+  stockoutEvents         StockoutEvent[]
+  sales                  Sale[]
+  productAliases         ProductAlias[]
+  inventorySnapshotItems InventorySnapshotItem[]
   /// Etapa 5 -- dos relaciones nombradas: un producto puede aparecer tanto
   /// como el producto VENDIDO de una receta (BomProduct) como el INSUMO
   /// consumido por la receta de otro producto (BomComponent).
-  bomItemsAsProduct   BillOfMaterialItem[] @relation("BomProduct")
-  bomItemsAsComponent BillOfMaterialItem[] @relation("BomComponent")
+  bomItemsAsProduct      BillOfMaterialItem[]    @relation("BomProduct")
+  bomItemsAsComponent    BillOfMaterialItem[]    @relation("BomComponent")
 
   @@unique([organizationId, code])
   /// Habilita la FK compuesta (organizationId, productId) desde InventoryMovement — Etapa 3.
@@ -561,21 +574,25 @@ model InventoryMovement {
   /// sección 19 del prompt, P-001 ya resuelto). FK compuesta multi-organización.
   createdById String @map("created_by") @db.Uuid
 
-  organization        Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   /// FKs compuestas (organizationId, x) -> Master(organizationId, id):
   /// aplica a este ledger lo aprendido en Etapa 2.1 -- ningún movimiento
   /// puede referenciar una ubicación, producto, unidad, usuario u otro
   /// movimiento de una organización distinta. Ver "Multi-organización" en
   /// docs/ETAPA-3-MOTOR-INVENTARIO.md.
-  location            Location            @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
-  product             Product             @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
-  entryUnitOfMeasure  UnitOfMeasure       @relation(fields: [organizationId, entryUnitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
-  createdBy           AppUser             @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
-  reversesMovement    InventoryMovement?  @relation("MovementReversal", fields: [organizationId, reversesMovementId], references: [organizationId, id], onDelete: Restrict)
-  reversedByMovements InventoryMovement[] @relation("MovementReversal")
+  location              Location               @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  product               Product                @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  entryUnitOfMeasure    UnitOfMeasure          @relation(fields: [organizationId, entryUnitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
+  createdBy             AppUser                @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+  reversesMovement      InventoryMovement?     @relation("MovementReversal", fields: [organizationId, reversesMovementId], references: [organizationId, id], onDelete: Restrict)
+  reversedByMovements   InventoryMovement[]    @relation("MovementReversal")
   /// Presente sólo cuando `movementType = WASTE` y se originó desde la
   /// pantalla de mermas de Etapa 4 (ver modelo `Waste` más abajo).
-  waste               Waste?
+  waste                 Waste?
+  /// Presente sólo cuando `movementType = COUNT_CORRECTION` y se originó
+  /// desde un cierre semanal de Etapa 6 (ver `InventorySnapshotItem` más
+  /// abajo) -- mismo patrón 1:1 opcional que `waste` de Etapa 4.
+  inventorySnapshotItem InventorySnapshotItem?
 
   @@unique([organizationId, id])
   /// Idempotencia (sección 14 del prompt): un mismo evento externo (mismo
@@ -1208,4 +1225,203 @@ model Sale {
   @@unique([organizationId, movementId])
   @@index([organizationId, locationId, occurredAt])
   @@map("sale")
+}
+
+/// Estado del cierre semanal (Etapa 6, sección 11 del prompt). Deliberadamente
+/// sólo tres valores PERSISTIDOS -- "INCOMPLETE"/"READY_TO_CLOSE" sugeridos
+/// por el documento del cliente (sección 24.1) son ESTADOS DERIVADOS, nunca
+/// guardados: se calculan en el momento a partir del checklist (mismo
+/// criterio que `SalesImportPreview.canConfirm` de Etapa 5.1 -- ver
+/// `apps/api/src/services/weekly-closing.ts`, `computeChecklist`). Guardar un
+/// booleano/enum aparte para eso arriesgaría desincronizarse del checklist
+/// real; derivarlo siempre en el momento lo hace imposible.
+enum WeeklyClosingStatus {
+  /// Semana operativa en curso, todavía no cerrada. Único estado desde el
+  /// que se puede cerrar (`close`).
+  OPEN
+  /// Cierre definitivo: inmutable (sección 16 del prompt) -- ninguna
+  /// operación de Etapa 6 modifica un WeeklyClosing en este estado, salvo
+  /// `reopen`, que lo mueve a REOPENED.
+  CLOSED
+  /// Reabierto por un ADMIN (sección 12): el `InventorySnapshotItem` de la
+  /// revisión CLOSED anterior se preserva intacto (nunca se edita/borra) --
+  /// un nuevo cierre desde acá genera una revisión nueva, no reescribe la
+  /// vieja. Desde REOPENED se puede volver a cerrar (nueva revisión) igual
+  /// que desde OPEN.
+  REOPENED
+
+  @@map("weekly_closing_status")
+}
+
+/// Cierre semanal del núcleo operativo (Etapa 6, RF conceptual del documento
+/// del cliente sección 24, CONFIRMADO). Consolida el estado de una semana
+/// [periodStart..periodEnd] para una ubicación después de que conteo físico,
+/// mermas, retiros de latas, gastos variables y ventas importadas ya están
+/// cargados -- nunca reemplaza al ledger (`InventoryMovement` sigue siendo
+/// la única fuente de verdad de stock, sección 2 del prompt): esta tabla
+/// sólo consulta/compara/consolida y genera un snapshot histórico.
+///
+/// Período semanal (sección 4 del prompt, documento del cliente sección 24,
+/// cita textual): "Período: lunes a domingo. Cierre: lunes siguiente." ->
+/// `periodStart` es SIEMPRE un lunes, `periodEnd = periodStart + 6` (el
+/// domingo de esa misma semana) -- CHECK agregado a mano en la migración
+/// (Prisma no expresa `periodEnd = periodStart + 6` declarativamente, mismo
+/// patrón que otros CHECK del proyecto).
+///
+/// Qué conteo gobierna el cierre de un período [Lunes N .. Domingo N]: el
+/// documento del cliente (sección 15) confirma que "el conteo semanal
+/// principal se realiza los lunes por la mañana, antes de recibir o
+/// despachar mercadería" -- es decir, el conteo tomado el lunes SIGUIENTE
+/// (N+7) es el que valida lo ocurrido DURANTE el período N (el conteo del
+/// propio lunes N valida en cambio el CIERRE del período anterior). Por
+/// eso el backend busca el `InventoryCount` con
+/// `weekStart = periodStart + 7 días` -- ver
+/// `apps/api/src/services/weekly-closing.ts`, `getGoverningInventoryCount`,
+/// y docs/ETAPA-6-CIERRE-SEMANAL.md, sección "Período semanal", para el
+/// ejemplo concreto de fechas con el que se verificó este razonamiento.
+model WeeklyClosing {
+  id             String              @id @default(uuid()) @db.Uuid
+  organizationId String              @map("organization_id") @db.Uuid
+  locationId     String              @map("location_id") @db.Uuid
+  periodStart    DateTime            @map("period_start") @db.Date
+  periodEnd      DateTime            @map("period_end") @db.Date
+  status         WeeklyClosingStatus @default(OPEN)
+
+  /// Confirmación ÚNICA y consolidada de que un ADMIN revisó el checklist
+  /// completo (mermas, gastos, ventas importadas, etc.) antes de cerrar --
+  /// sección 5 del prompt: "si el modelo actual no tiene forma inequívoca de
+  /// distinguir 'no hubo mermas' de 'nadie revisó las mermas', no inventar
+  /// una regla oculta". En vez de un flag booleano por sub-ítem (mermas
+  /// revisadas / gastos revisados / etc., que multiplicaría columnas sin
+  /// necesidad real), se usa UN solo gesto explícito de revisión que cubre
+  /// todo el checklist a la vez -- el ADMIN ve el resumen completo en la
+  /// misma pantalla antes de confirmar (sección 19). `countSubmitted` (ver
+  /// servicio) es la única sub-condición que SÍ se verifica de forma
+  /// automática e inequívoca (existencia de un InventoryCount COMPLETED).
+  reviewConfirmedById String?   @map("review_confirmed_by") @db.Uuid
+  reviewConfirmedAt   DateTime? @map("review_confirmed_at") @db.Timestamptz(6)
+
+  /// Incrementada en cada cierre exitoso (empieza en 0, pasa a 1 en el
+  /// primer `close`, a 2 si se reabre y se vuelve a cerrar, etc.). Sección
+  /// 12 del prompt: "preferir versionado... antes que mutar el snapshot
+  /// anterior" -- cada `InventorySnapshotItem` generado por un `close` queda
+  /// etiquetado con el valor de `currentRevision` vigente EN ESE MOMENTO,
+  /// así que reabrir y volver a cerrar nunca sobrescribe ni borra filas de
+  /// una revisión previa.
+  currentRevision Int @default(0) @map("current_revision")
+
+  createdById String   @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  /// Reflejan el cierre MÁS RECIENTE (si se reabre y se vuelve a cerrar, se
+  /// sobrescriben con los datos del nuevo cierre) -- el cierre anterior
+  /// queda igual trazado a través de `reopenedAt`/`reopenedById` y de las
+  /// filas de `InventorySnapshotItem` con `revision` menor.
+  closedById String?   @map("closed_by") @db.Uuid
+  closedAt   DateTime? @map("closed_at") @db.Timestamptz(6)
+
+  /// Reflejan la reapertura MÁS RECIENTE. `reopenReason` obligatorio a nivel
+  /// de aplicación (operación sensible, sección 12 del prompt) -- CHECK a
+  /// mano en la migración exige `reopen_reason IS NOT NULL` cuando
+  /// `reopened_at IS NOT NULL`, mismo patrón que el CHECK de `reason` en
+  /// `InventoryMovement`.
+  reopenedById String?   @map("reopened_by") @db.Uuid
+  reopenedAt   DateTime? @map("reopened_at") @db.Timestamptz(6)
+  reopenReason String?   @map("reopen_reason")
+
+  /// Idempotencia del cierre definitivo (sección 13 del prompt, mismo patrón
+  /// que Etapa 3.1/4.1: UNIQUE + fingerprint + resolución explícita de
+  /// carrera reconsultando Postgres). Se resetea a NULL en cada `reopen`
+  /// para que el próximo `close` pueda usar una clave nueva -- un reintento
+  /// de un `close` YA reabierto nunca debe confundirse con el cierre
+  /// anterior (clave distinta = revisión distinta).
+  closeIdempotencyKey         String? @map("close_idempotency_key")
+  closeIdempotencyFingerprint String? @map("close_idempotency_fingerprint")
+
+  organization      Organization            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location          Location                @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  createdBy         AppUser                 @relation("WeeklyClosingCreatedBy", fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+  reviewConfirmedBy AppUser?                @relation("WeeklyClosingReviewConfirmedBy", fields: [organizationId, reviewConfirmedById], references: [organizationId, id], onDelete: Restrict)
+  closedBy          AppUser?                @relation("WeeklyClosingClosedBy", fields: [organizationId, closedById], references: [organizationId, id], onDelete: Restrict)
+  reopenedBy        AppUser?                @relation("WeeklyClosingReopenedBy", fields: [organizationId, reopenedById], references: [organizationId, id], onDelete: Restrict)
+  snapshotItems     InventorySnapshotItem[]
+
+  /// Habilita la FK compuesta (organizationId, weeklyClosingId) desde
+  /// InventorySnapshotItem.
+  @@unique([organizationId, id])
+  /// A lo sumo un WeeklyClosing por ubicación y período -- evita períodos
+  /// superpuestos y dos cierres activos para la misma ubicación/período
+  /// (sección 4 del prompt).
+  @@unique([organizationId, locationId, periodStart])
+  @@unique([organizationId, closeIdempotencyKey])
+  @@index([organizationId, locationId, periodStart])
+  @@map("weekly_closing")
+}
+
+/// Snapshot histórico e inmutable de un producto al momento de un cierre
+/// semanal (sección 9 del prompt, CONFIRMADO). Nunca se recalcula
+/// retroactivamente con valores actuales -- congela `quantityTheoretical`/
+/// `quantityReal`/`difference` copiados directamente de la línea de
+/// `InventoryCountItem` que gobierna el cierre (nunca recalculados de forma
+/// independiente, para no arriesgar una discrepancia con el conteo real).
+///
+/// Valoración monetaria (sección 10 del prompt) DELIBERADAMENTE OMITIDA: hoy
+/// `Product` no tiene ningún campo de costo/precio (el documento del cliente,
+/// secciones 12/13/23/46, reserva la lista de costos/precios explícitamente
+/// para "Hito 1b en adelante" -- `SalesImportRow.unitPriceAvg` de Etapa 5 es
+/// un promedio informativo de precio de VENTA, no un costo, y no corresponde
+/// como fuente de valoración de inventario). Inventar FIFO, costo promedio
+/// ponderado, margen o cualquier criterio de valoración sin esa fuente
+/// violaría la sección 10 del prompt ("no inventar") -- ver
+/// docs/ETAPA-6-CIERRE-SEMANAL.md, sección "Valoración", para la limitación
+/// documentada.
+model InventorySnapshotItem {
+  id              String @id @default(uuid()) @db.Uuid
+  organizationId  String @map("organization_id") @db.Uuid
+  /// Denormalizado desde el WeeklyClosing para consultas directas por
+  /// ubicación (misma convención que otras tablas del proyecto, p. ej.
+  /// `Sale.locationId` ya denormalizado desde `SalesImport`).
+  locationId      String @map("location_id") @db.Uuid
+  weeklyClosingId String @map("weekly_closing_id") @db.Uuid
+  productId       String @map("product_id") @db.Uuid
+
+  /// Coincide con `WeeklyClosing.currentRevision` en el momento en que esta
+  /// fila se generó -- distingue las filas de cierres sucesivos del mismo
+  /// WeeklyClosing (reabierto y vuelto a cerrar) sin mutar ni borrar las
+  /// anteriores (sección 12 del prompt).
+  revision Int
+
+  /// Copiados directamente de `InventoryCountItem.theoreticalQuantity` /
+  /// `.physicalQuantity` / `.difference` del conteo gobernante -- nunca
+  /// recalculados acá (sección 7 del prompt).
+  quantityTheoretical Decimal @map("quantity_theoretical") @db.Decimal(14, 3)
+  quantityReal        Decimal @map("quantity_real") @db.Decimal(14, 3)
+  difference          Decimal @db.Decimal(14, 3)
+
+  /// Movimiento COUNT_CORRECTION generado por este cierre para reconciliar
+  /// la diferencia (sección 8 del prompt, documento del cliente sección
+  /// 16.1: "el real pasa a ser el nuevo punto de partida operativo... la
+  /// diferencia histórica se conserva"). NULL cuando `difference = 0` --
+  /// nunca se genera un ajuste sin diferencia real.
+  countCorrectionMovementId String? @map("count_correction_movement_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization            Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location                Location           @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  weeklyClosing           WeeklyClosing      @relation(fields: [organizationId, weeklyClosingId], references: [organizationId, id], onDelete: Restrict)
+  product                 Product            @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  countCorrectionMovement InventoryMovement? @relation(fields: [organizationId, countCorrectionMovementId], references: [organizationId, id], onDelete: Restrict)
+
+  /// Una fila por producto y revisión de un mismo cierre -- reabrir y volver
+  /// a cerrar genera una revisión nueva (sección 12), nunca reescribe la
+  /// anterior.
+  @@unique([organizationId, weeklyClosingId, productId, revision])
+  /// A lo sumo un InventorySnapshotItem por movimiento COUNT_CORRECTION
+  /// (defensa en profundidad; NULLs no colisionan entre sí en Postgres, así
+  /// que esto no afecta a las filas con `difference = 0`).
+  @@unique([organizationId, countCorrectionMovementId])
+  @@index([organizationId, locationId, productId])
+  @@index([organizationId, weeklyClosingId])
+  @@map("inventory_snapshot_item")
 }

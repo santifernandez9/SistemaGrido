@@ -7,3 +7,4 @@ export * from './catalog.js';
 export * from './inventory.js';
 export * from './shop-ops.js';
 export * from './sales-import.js';
+export * from './weekly-closing.js';

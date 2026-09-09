@@ -19,6 +19,11 @@ export async function resetCoreTables(): Promise<void> {
   await prisma.salesImport.deleteMany();
   await prisma.productAlias.deleteMany();
   await prisma.billOfMaterialItem.deleteMany();
+  // Etapa 6: InventorySnapshotItem referencia InventoryMovement
+  // (countCorrectionMovementId) y WeeklyClosing -- tiene que borrarse antes
+  // que ambos.
+  await prisma.inventorySnapshotItem.deleteMany();
+  await prisma.weeklyClosing.deleteMany();
   await prisma.inventoryMovement.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
