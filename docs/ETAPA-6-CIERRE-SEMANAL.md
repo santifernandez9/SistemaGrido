@@ -1,6 +1,23 @@
 # ETAPA 6 — Cierre Semanal del Núcleo
 
-Versión: 1.0 · Rama: `claude/etapa-6-cierre-semanal`
+Versión: 1.1 · Rama: `claude/etapa-6-cierre-semanal`
+
+> **Actualización — Etapa 6.1 (hardening: consistencia temporal de la
+> reconciliación).** Auditoría posterior detectó una carrera real en
+> `closeWeeklyClosing`: el ajuste `COUNT_CORRECTION` se calculaba como
+> `cantidad real del conteo − saldo VIGENTE del ledger al momento de cerrar`,
+> lo que podía absorber, como si fueran parte de la diferencia física del
+> conteo, movimientos legítimos (ventas, mermas, otros ajustes) ocurridos
+> DESPUÉS del conteo pero antes o durante el cierre. Corregido: el ajuste es
+> SIEMPRE la diferencia histórica congelada en el conteo
+> (`InventoryCountItem.difference`), y la reconciliación "ya aplicada" se
+> determina consultando la trazabilidad YA PERSISTIDA del ledger
+> (`InventoryMovement.sourceDocumentType`/`sourceDocumentId`), nunca
+> comparando contra el saldo actual. También se corrigió un `continue`
+> silencioso que hubiera dejado un cierre parcialmente aplicado si un
+> producto del conteo gobernante no podía resolverse -- ahora aborta todo el
+> cierre (rollback completo). Ver la sección "Etapa 6.1" más abajo para el
+> detalle completo.
 
 ## 1. Fuente de verdad
 
@@ -172,44 +189,30 @@ cargado) se procesa exactamente igual — no hay ninguna validación que lo bloq
 ## 8. Diferencia y ajuste (`COUNT_CORRECTION`)
 
 El documento del cliente (§16.1) confirma que el cierre SÍ reconcilia automáticamente:
-"el real pasa a ser el nuevo punto de partida operativo". Se generó, entonces, un
-movimiento `COUNT_CORRECTION` por producto con diferencia pendiente — tipo YA reservado
-en el ledger desde la migración original de Etapa 3 (`inventory_movement.reason IS NOT
-NULL OR movement_type NOT IN ('ADJUSTMENT','COUNT_CORRECTION')`), sin necesidad de tocar
-el ledger.
+"el real pasa a ser el nuevo punto de partida operativo". Se genera, entonces, un
+movimiento `COUNT_CORRECTION` por producto con diferencia histórica no nula — tipo YA
+reservado en el ledger desde la migración original de Etapa 3
+(`inventory_movement.reason IS NOT NULL OR movement_type NOT IN
+('ADJUSTMENT','COUNT_CORRECTION')`), sin necesidad de tocar el ledger.
 
-**Decisión de diseño no trivial, verificada con un test de regresión dedicado** (ver
-sección 16, "recierre no duplica el ajuste"): el ajuste efectivamente aplicado al ledger
-**no** es la diferencia histórica congelada del conteo. Es, calculado DENTRO de la misma
-transacción de cierre:
+El ajuste efectivamente aplicado es SIEMPRE la diferencia histórica congelada del conteo
+(`InventoryCountItem.difference`, copiada a `InventorySnapshotItem.difference`) — nunca se
+recalcula comparando contra el saldo actual del ledger. Cómo se evita duplicarlo en un
+recierre sin absorber movimientos posteriores al conteo se explica en detalle en la
+sección "Etapa 6.1 — Consistencia temporal de la reconciliación" más abajo (una revisión
+anterior de este documento describía acá una estrategia -- comparar contra el teórico
+vigente del ledger -- que resultó tener una carrera real; ver esa sección para la
+corrección completa).
 
-```
-ajuste_pendiente = cantidad_real_contada − teórico_VIGENTE_del_ledger_en_este_instante
-```
-
-Por qué: si se usara siempre la diferencia congelada del conteo, un `WeeklyClosing`
-reabierto y vuelto a cerrar (sin un conteo nuevo — no existe forma de generar uno para la
-misma semana, ver sección 11) volvería a aplicar el MISMO ajuste una segunda vez, dejando
-el ledger mal (doble corrección). Calculando contra el teórico vigente, la primera vez que
-se cierra el ajuste pendiente coincide exactamente con la diferencia histórica (nada más
-tocó el ledger todavía); en un recierre posterior sin conteo nuevo, el teórico vigente ya
-quedó reconciliado por el `COUNT_CORRECTION` anterior, así que el ajuste pendiente da
-CERO y no se genera un segundo movimiento — exactamente lo que pide §16.1 ("el real pasa a
-ser el nuevo punto de partida").
-
-El snapshot (`InventorySnapshotItem.difference`) sigue mostrando SIEMPRE la diferencia
-HISTÓRICA original del conteo, sin importar cuántas veces se recierre — es un campo
-puramente informativo/histórico, distinto del ajuste que efectivamente se aplicó
-(`countCorrectionMovementId`, `null` cuando no hubo ajuste pendiente esa vez).
-
-Nunca se genera un `COUNT_CORRECTION` cuando el ajuste pendiente da exactamente cero.
+Nunca se genera un `COUNT_CORRECTION` cuando la diferencia histórica es exactamente cero.
 
 `quantity`/`enteredQuantity` del movimiento se cargan con el mismo valor exacto
 (`conversionFactor = 1`) en vez de convertir a la unidad de manejo del producto —
 documentado en el propio código: evita cualquier división/multiplicación intermedia que
 arriesgue redondeo sobre una cantidad ya calculada con precisión. `sourceDocumentType =
 'WEEKLY_CLOSING'`, `sourceDocumentId = WeeklyClosing.id` (mismo mecanismo de trazabilidad
-reservado desde Etapa 3).
+reservado desde Etapa 3) — y, desde Etapa 6.1, también la CLAVE que determina si la
+diferencia de un producto ya fue reconciliada por este cierre.
 
 ## 9. Snapshot histórico
 
@@ -314,8 +317,9 @@ verificado en tests.
 
 ## 16. Tests agregados (backend)
 
-`apps/api/src/routes/weekly-closing.test.ts` — 27 tests nuevos, todos contra Postgres
-real (mismo criterio que el resto del proyecto desde Etapa 1), organizados en:
+`apps/api/src/routes/weekly-closing.test.ts` — 32 tests (27 de Etapa 6 + 5 de Etapa 6.1),
+todos contra Postgres real (mismo criterio que el resto del proyecto desde Etapa 1),
+organizados en:
 
 - **Preparación:** cierre nuevo OPEN; preparar el mismo período dos veces no duplica
   (get-or-create); `periodStart` que no es lunes → 400; dos ubicaciones con el mismo
@@ -345,10 +349,16 @@ real (mismo criterio que el resto del proyecto desde Etapa 1), organizados en:
   descripta en la sección 8 — verifica el saldo final exacto, no sólo la ausencia de un
   segundo `COUNT_CORRECTION`); permisos en reapertura.
 - **Aislamiento multi-organización:** un cierre de otra organización → 404.
+- **Etapa 6.1 — consistencia temporal de la reconciliación** (ver sección 21 más abajo
+  para el detalle de cada escenario): TEST A (movimiento posterior al conteo, antes del
+  cierre, no se absorbe); TEST B (reapertura con movimiento posterior: recierre no
+  duplica el ajuste ni revierte el movimiento); TEST C (producto inconsistente aborta
+  TODO el cierre, rollback completo verificado); TEST D (dos cierres concurrentes, un
+  único conjunto de correcciones); TEST E (movimiento concurrente durante el cierre,
+  resultado determinístico).
 
-Regresión completa: `npm run test` (apps/api) corre los 277 tests del monorepo backend
-(17 archivos, incluidas todas las suites de Etapas 1 a 5.2) — todos verdes junto con los
-27 nuevos de Etapa 6.
+Regresión completa: `npm run test` (apps/api) corre los 282 tests del monorepo backend
+(17 archivos, incluidas todas las suites de Etapas 1 a 6) — todos verdes.
 
 ## 17. Supuestos y decisiones mínimas documentadas
 
@@ -397,3 +407,157 @@ botón "Confirmar que revisé el checklist", botón "Cerrar semana" (deshabilita
 motivo exacto de qué falta hasta que `canClose` sea verdadero, mismo criterio de UX que
 Etapa 5.1 con la confirmación de ventas), y — sólo para cierres `CLOSED` — un formulario
 de reapertura con motivo obligatorio. Sin dashboards ni gráficos avanzados.
+
+## 21. Etapa 6.1 — Consistencia temporal de la reconciliación
+
+Hardening posterior a la entrega inicial de Etapa 6. Corrige una carrera real en
+`closeWeeklyClosing` (`apps/api/src/services/weekly-closing.ts`) y un `continue` silencioso
+que podía dejar un cierre parcialmente aplicado. No cambia el modelo de datos conceptual,
+el checklist, los permisos ni el flujo de admin-web — sólo cómo se decide y aplica el
+ajuste `COUNT_CORRECTION` dentro de la transacción de cierre.
+
+### 21.1. Por qué `real histórico − saldo actual` es incorrecto
+
+La versión original de Etapa 6 calculaba, DENTRO de la transacción de cierre:
+
+```
+pendingAdjustment = cantidad_real_del_conteo − SUM(InventoryMovement.quantity vigente)
+```
+
+Esto parece razonable a primera vista ("cuánto falta para que el ledger refleje lo que el
+conteo dijo"), pero el saldo vigente del ledger **no es un valor congelado** — sigue
+recibiendo movimientos legítimos (ventas importadas, mermas, bajas de lata, otros ajustes)
+en cualquier momento, incluso mientras se está cerrando la semana. Ejemplo concreto (el
+mismo que reprodujo el TEST A):
+
+1. El conteo gobernante ya está `COMPLETED`: teórico = 10, real = 12, diferencia
+   histórica = +2.
+2. Antes de que un ADMIN llegue a apretar "Cerrar semana", entra una venta real de -3
+   (legítima, del período siguiente, sin relación con el conteo). Saldo del ledger: 7.
+3. `closeWeeklyClosing` calcula `pendingAdjustment = 12 − 7 = +5` y genera un
+   `COUNT_CORRECTION` de +5.
+
+Ese +5 es incorrecto: absorbe la venta de -3 como si fuera parte de la diferencia física
+que el conteo detectó, cuando en realidad son dos hechos independientes (una diferencia de
+conteo de +2, y una venta de -3 ocurrida después). El stock final quedaba en 12 en vez de
+9 — un error real de reconciliación, no sólo un problema de duplicación.
+
+La inmutabilidad de `InventoryCount` (una vez `COMPLETED`, nunca se vuelve a tocar) **no
+resuelve esto**: protege la LECTURA del conteo, pero `InventoryMovement` sigue siendo
+mutable por diseño (es el ledger operativo) y nada impide que reciba movimientos nuevos en
+cualquier momento, conteo de por medio o no.
+
+### 21.2. Regla aplicada ahora
+
+El ajuste que se aplica al ledger es SIEMPRE la diferencia histórica congelada del conteo:
+
+```
+countCorrectionQuantity = InventoryCountItem.difference   (real − teórico AL MOMENTO DEL CONTEO)
+```
+
+Copiada 1:1 desde `InventoryCountItem` (vía `computeLiveItems`) a
+`InventorySnapshotItem.difference` — nunca se recalcula contra ningún estado posterior del
+ledger, ni al cerrar por primera vez, ni al recerrar. Un movimiento ocurrido después del
+conteo (venta, merma, ajuste, otro `COUNT_CORRECTION` de otra semana) nunca puede alterar
+cuánto vale este ajuste.
+
+### 21.3. Cómo se sabe si la diferencia ya fue reconciliada (sin mirar el saldo)
+
+En vez de inferir "cuánto falta" comparando contra el saldo actual, `closeWeeklyClosing`
+consulta la trazabilidad YA PERSISTIDA del propio ledger, DENTRO de la transacción:
+
+```sql
+SELECT id, product_id FROM inventory_movement
+WHERE organization_id = :organizationId
+  AND location_id = :locationId
+  AND movement_type = 'COUNT_CORRECTION'
+  AND source_document_type = 'WEEKLY_CLOSING'
+  AND source_document_id = :weeklyClosingId   -- constante a través de todas las revisiones
+  AND product_id IN (:productIds)
+```
+
+`sourceDocumentType`/`sourceDocumentId` es el mecanismo de trazabilidad reservado desde la
+migración original del ledger (Etapa 3) — ya usado por `SALE`/`BOM_CONSUMPTION`, no una
+tabla nueva. Como `WeeklyClosing.id` es constante a lo largo de todas sus revisiones
+(reabrir nunca cambia el id), esta consulta encuentra la corrección de CUALQUIER cierre
+previo de ESTE `WeeklyClosing` para el mismo producto:
+
+- **No existe todavía** → se crea un `COUNT_CORRECTION` por la diferencia histórica exacta
+  (si es distinta de cero).
+- **Ya existe** → la revisión actual REUTILIZA esa misma referencia
+  (`InventorySnapshotItem.countCorrectionMovementId` apunta al movimiento YA creado) — no
+  se crea un segundo movimiento, no se vuelve a tocar el ledger.
+
+Consecuencia de schema (ver sección 4 y la migración
+`20260910120000_weekly_closing_correction_traceability_etapa6_1`): como ahora un mismo
+`COUNT_CORRECTION` puede quedar referenciado por varias `InventorySnapshotItem` (una por
+cada revisión que lo reutiliza), el UNIQUE anterior sobre
+`inventory_snapshot_item.count_correction_movement_id` dejó de ser un invariante válido y
+se reemplazó por un índice simple. La garantía real de unicidad se movió al lugar
+correcto: un índice único PARCIAL sobre `inventory_movement(organization_id,
+source_document_id, product_id) WHERE movement_type = 'COUNT_CORRECTION' AND
+source_document_type = 'WEEKLY_CLOSING'` — PostgreSQL rechaza, a nivel de base de datos,
+cualquier intento (con o sin bug de aplicación de por medio) de crear un segundo ajuste
+para el mismo (cierre, producto).
+
+### 21.4. Movimientos posteriores al conteo, durante el cierre, y tras el primer cierre
+
+Los tres escenarios pedidos quedan cubiertos por el mismo mecanismo, sin necesitar tres
+soluciones distintas:
+
+- **Posterior al conteo, antes del cierre** (TEST A): el ajuste sigue siendo la diferencia
+  histórica (+2 en el ejemplo); el movimiento posterior (venta -3) se conserva
+  íntegramente. Resultado: 7 (tras la venta) + 2 (ajuste) = 9 — nunca 12.
+- **Concurrente con el cierre** (TEST E): como el ajuste nunca lee el saldo del ledger, es
+  imposible que un movimiento que se inserta "mientras" corre la transacción de cierre
+  altere el valor del `COUNT_CORRECTION` — el resultado es determinístico
+  independientemente del orden real de ejecución entre ambas operaciones.
+- **Tras el primer cierre + reapertura + recierre, sin conteo nuevo** (TEST B): la consulta
+  de trazabilidad de la sección 21.3 encuentra el `COUNT_CORRECTION` ya existente y lo
+  reutiliza — cero movimientos nuevos, el efecto de cualquier venta/merma ocurrida entre
+  medio se conserva intacto.
+
+### 21.5. Rollback ante un producto inconsistente
+
+La versión original tenía:
+
+```ts
+if (!product) {
+  fastify.log.error(...);
+  continue; // saltea este producto y sigue con el resto
+}
+```
+
+Esto podía dejar, en teoría, un cierre `CLOSED` con snapshot parcial (99 productos con su
+fila, 1 sin ella) si algún producto del conteo gobernante no se pudiera resolver. Corregido:
+ese `continue` se reemplazó por `throw new InternalError(...)`, dentro de la misma
+transacción — Postgres hace ROLLBACK completo: el `WeeklyClosing` NO queda `CLOSED`
+(vuelve a su estado previo, `currentRevision` sin incrementar, `closeIdempotencyKey` sin
+setear), no queda ningún `InventorySnapshotItem` nuevo, ningún `COUNT_CORRECTION` nuevo, ni
+auditoría `WEEKLY_CLOSING_CLOSED`. Verificado en TEST C, forzando la condición mediante un
+`Proxy` sobre el cliente de Prisma usado dentro de la transacción (la integridad
+referencial de `InventoryCountItem -> Product` hace que este caso sea, en la práctica,
+irreproducible por otra vía — la FK ya lo impide a nivel de base de datos; el `throw` es
+una defensa adicional, no una validación de negocio esperable).
+
+### 21.6. Estrategia de concurrencia (sin cambios de fondo respecto a Etapa 6)
+
+Sigue sin hacer falta `Serializable`. La causa de la carrera corregida acá NO era "el
+`InventoryCount` puede cambiar" (eso ya estaba cubierto — sigue siendo terminal una vez
+`COMPLETED`) sino "el ajuste dependía de leer `InventoryMovement`, que SÍ es mutable". La
+corrección elimina esa dependencia por completo: el ajuste nunca vuelve a leer
+`InventoryMovement` para decidir su valor, sólo para decidir si YA EXISTE uno (una consulta
+de existencia, no un cálculo). Esa consulta ocurre DENTRO de la transacción, después del
+UPDATE condicional que ya serializa cualquier cierre concurrente de ESTE `WeeklyClosing`
+contra sí mismo (Postgres no deja que dos transacciones ganen esa misma fila a la vez) — y
+el UNIQUE parcial de la sección 21.3 es la garantía final a nivel de base de datos. Sigue
+sin usarse ningún lock en memoria, mutex, cache ni sleep.
+
+### 21.7. Migración
+
+Una migración nueva, `20260910120000_weekly_closing_correction_traceability_etapa6_1`
+(no se modificó ninguna migración histórica): reemplaza el UNIQUE de
+`inventory_snapshot_item.count_correction_movement_id` por un índice simple, y agrega el
+índice único parcial sobre `inventory_movement` descripto en la sección 21.3. Verificada
+aplicando limpio desde cero (`prisma migrate deploy` contra una base vacía, las 10
+migraciones en orden) antes de dar por terminada la etapa.

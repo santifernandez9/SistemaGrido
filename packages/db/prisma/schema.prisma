@@ -574,25 +574,29 @@ model InventoryMovement {
   /// sección 19 del prompt, P-001 ya resuelto). FK compuesta multi-organización.
   createdById String @map("created_by") @db.Uuid
 
-  organization          Organization           @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  organization           Organization            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   /// FKs compuestas (organizationId, x) -> Master(organizationId, id):
   /// aplica a este ledger lo aprendido en Etapa 2.1 -- ningún movimiento
   /// puede referenciar una ubicación, producto, unidad, usuario u otro
   /// movimiento de una organización distinta. Ver "Multi-organización" en
   /// docs/ETAPA-3-MOTOR-INVENTARIO.md.
-  location              Location               @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
-  product               Product                @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
-  entryUnitOfMeasure    UnitOfMeasure          @relation(fields: [organizationId, entryUnitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
-  createdBy             AppUser                @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
-  reversesMovement      InventoryMovement?     @relation("MovementReversal", fields: [organizationId, reversesMovementId], references: [organizationId, id], onDelete: Restrict)
-  reversedByMovements   InventoryMovement[]    @relation("MovementReversal")
+  location               Location                @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  product                Product                 @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  entryUnitOfMeasure     UnitOfMeasure           @relation(fields: [organizationId, entryUnitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
+  createdBy              AppUser                 @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+  reversesMovement       InventoryMovement?      @relation("MovementReversal", fields: [organizationId, reversesMovementId], references: [organizationId, id], onDelete: Restrict)
+  reversedByMovements    InventoryMovement[]     @relation("MovementReversal")
   /// Presente sólo cuando `movementType = WASTE` y se originó desde la
   /// pantalla de mermas de Etapa 4 (ver modelo `Waste` más abajo).
-  waste                 Waste?
+  waste                  Waste?
   /// Presente sólo cuando `movementType = COUNT_CORRECTION` y se originó
   /// desde un cierre semanal de Etapa 6 (ver `InventorySnapshotItem` más
-  /// abajo) -- mismo patrón 1:1 opcional que `waste` de Etapa 4.
-  inventorySnapshotItem InventorySnapshotItem?
+  /// abajo). Etapa 6.1: relación 1-a-MUCHOS, no 1-a-1 -- un mismo
+  /// movimiento de corrección puede quedar referenciado por más de una
+  /// `InventorySnapshotItem` (una por cada revisión del `WeeklyClosing`
+  /// que reutiliza la corrección ya aplicada en vez de duplicarla, ver
+  /// `closeWeeklyClosing`).
+  inventorySnapshotItems InventorySnapshotItem[]
 
   @@unique([organizationId, id])
   /// Idempotencia (sección 14 del prompt): un mismo evento externo (mismo
@@ -1398,11 +1402,23 @@ model InventorySnapshotItem {
   quantityReal        Decimal @map("quantity_real") @db.Decimal(14, 3)
   difference          Decimal @db.Decimal(14, 3)
 
-  /// Movimiento COUNT_CORRECTION generado por este cierre para reconciliar
-  /// la diferencia (sección 8 del prompt, documento del cliente sección
-  /// 16.1: "el real pasa a ser el nuevo punto de partida operativo... la
-  /// diferencia histórica se conserva"). NULL cuando `difference = 0` --
-  /// nunca se genera un ajuste sin diferencia real.
+  /// Movimiento COUNT_CORRECTION que reconcilia la diferencia histórica de
+  /// este producto para este `WeeklyClosing` (sección 8 del prompt,
+  /// documento del cliente sección 16.1: "el real pasa a ser el nuevo punto
+  /// de partida operativo... la diferencia histórica se conserva"). NULL
+  /// cuando `difference = 0` -- nunca se genera un ajuste sin diferencia
+  /// real.
+  ///
+  /// Etapa 6.1: un mismo `WeeklyClosing` genera A LO SUMO un
+  /// COUNT_CORRECTION por producto en toda su vida (ver el UNIQUE parcial
+  /// sobre `inventory_movement` agregado a mano en la migración
+  /// `20260910120000_weekly_closing_correction_traceability_etapa6_1`) --
+  /// si se reabre y se vuelve a cerrar SIN un conteo nuevo, la revisión
+  /// siguiente reutiliza el MISMO `countCorrectionMovementId` (nunca crea
+  /// uno nuevo), así que esta columna YA NO es única por fila: varias
+  /// `InventorySnapshotItem` de distintas revisiones del mismo cierre
+  /// pueden apuntar al mismo movimiento -- ver
+  /// `apps/api/src/services/weekly-closing.ts`, `closeWeeklyClosing`.
   countCorrectionMovementId String? @map("count_correction_movement_id") @db.Uuid
 
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -1417,11 +1433,8 @@ model InventorySnapshotItem {
   /// a cerrar genera una revisión nueva (sección 12), nunca reescribe la
   /// anterior.
   @@unique([organizationId, weeklyClosingId, productId, revision])
-  /// A lo sumo un InventorySnapshotItem por movimiento COUNT_CORRECTION
-  /// (defensa en profundidad; NULLs no colisionan entre sí en Postgres, así
-  /// que esto no afecta a las filas con `difference = 0`).
-  @@unique([organizationId, countCorrectionMovementId])
   @@index([organizationId, locationId, productId])
+  @@index([organizationId, countCorrectionMovementId])
   @@index([organizationId, weeklyClosingId])
   @@map("inventory_snapshot_item")
 }

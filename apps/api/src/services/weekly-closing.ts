@@ -13,7 +13,7 @@ import type {
   WeeklyClosingItem,
 } from '@sistema-grido/shared-types';
 import type { CurrentUser } from '../plugins/auth.js';
-import { ConflictError, NotFoundError, ValidationError } from '../errors.js';
+import { ConflictError, InternalError, NotFoundError, ValidationError } from '../errors.js';
 import { assertLocationForMovement } from './inventory-ledger.js';
 import { isUniqueConstraintViolationOn } from './idempotency.js';
 
@@ -469,14 +469,41 @@ export async function confirmWeeklyClosingReview(
 /**
  * Cierre definitivo (sección 11/13/14 del prompt): TODO en una única
  * transacción -- transición de estado, `InventorySnapshotItem` por
- * producto, `COUNT_CORRECTION` por cada diferencia no nula, auditoría.
- * Si algo falla, ROLLBACK completo (nunca CLOSED sin snapshot, ni snapshot
- * sin cierre, ni ajuste parcial).
+ * producto, `COUNT_CORRECTION` por cada diferencia histórica no
+ * reconciliada todavía, auditoría. Si algo falla, ROLLBACK completo (nunca
+ * CLOSED sin snapshot, ni snapshot sin cierre, ni ajuste parcial).
  *
  * Idempotencia (sección 13): mismo patrón endurecido de Etapa 3.2/4.1/5.1 --
  * `closeIdempotencyKey`/`closeIdempotencyFingerprint` + UNIQUE + UPDATE
  * condicional (`status: OPEN|REOPENED -> CLOSED`) + resolución explícita de
  * carrera reconsultando Postgres, nunca locks en memoria.
+ *
+ * Consistencia temporal de la reconciliación (Etapa 6.1 -- ver
+ * docs/ETAPA-6-CIERRE-SEMANAL.md, sección "Etapa 6.1"): el ajuste que se
+ * aplica al ledger es SIEMPRE la diferencia histórica congelada en
+ * `InventoryCountItem` al momento del conteo (`item.difference`,
+ * `real - teórico EN ESE MOMENTO`) -- NUNCA se recalcula comparando contra
+ * el saldo VIGENTE del ledger, porque el saldo vigente puede incluir
+ * movimientos legítimos (ventas, mermas, otros ajustes) ocurridos DESPUÉS
+ * del conteo, que no son parte de la diferencia física que el conteo
+ * detectó. Si se reconciliara contra el saldo vigente, un movimiento
+ * legítimo posterior al conteo podría quedar absorbido silenciosamente
+ * como si fuera parte del ajuste del cierre.
+ *
+ * Para no duplicar el ajuste en un recierre (reapertura sin conteo nuevo),
+ * se consulta la trazabilidad YA PERSISTIDA del propio ledger antes de
+ * decidir si hace falta un `COUNT_CORRECTION` nuevo: `InventoryMovement`
+ * con `sourceDocumentType = 'WEEKLY_CLOSING'` y `sourceDocumentId =
+ * WeeklyClosing.id` (mecanismo reservado desde Etapa 3, el mismo que ya
+ * usan SALE/BOM_CONSUMPTION). Como `WeeklyClosing.id` es constante a
+ * través de todas sus revisiones, esa consulta encuentra la corrección de
+ * cualquier cierre previo de ESTE `WeeklyClosing` para el mismo producto
+ * -- si ya existe, la nueva revisión REUTILIZA esa misma referencia (nunca
+ * crea un segundo movimiento); si no existe, crea uno por la diferencia
+ * histórica exacta. Un índice único parcial sobre `inventory_movement`
+ * (migración `20260910120000_..._etapa6_1`) es la garantía de última
+ * instancia a nivel de PostgreSQL de que nunca puede existir más de un
+ * `COUNT_CORRECTION` por (cierre, producto).
  *
  * Concurrencia (sección 15): a diferencia de Etapa 5.2 (`ProductAlias`
  * remapeable en cualquier momento -- TOCTOU real), acá NO hace falta
@@ -485,10 +512,14 @@ export async function confirmWeeklyClosingReview(
  * es terminal -- `submitInventoryCount`/`submitInventoryRecount`
  * (inventory-count.ts) nunca vuelven a tocar sus `InventoryCountItem` una
  * vez alcanzado ese estado. Por eso leer teórico/real/diferencia ANTES de
- * abrir la transacción (en vez de adentro, como Etapa 5.2) es seguro: no
- * hay ninguna escritura concurrente posible sobre esos datos entre la
- * lectura y el commit. El UPDATE condicional + UNIQUE siguen siendo la
- * protección real contra dos cierres concurrentes de ESTE `WeeklyClosing`.
+ * abrir la transacción es seguro: no hay ninguna escritura concurrente
+ * posible sobre esos datos entre la lectura y el commit. La decisión de
+ * qué `COUNT_CORRECTION` corresponde (búsqueda de la trazabilidad
+ * existente + creación si falta) se hace DENTRO de la transacción, después
+ * del UPDATE condicional que ya serializa cualquier cierre concurrente de
+ * ESTE `WeeklyClosing` contra sí mismo (sólo una transacción puede ganar
+ * esa fila a la vez) -- eso, más el UNIQUE parcial de la migración, cierra
+ * la ventana también bajo dos requests de cierre concurrentes.
  */
 export async function closeWeeklyClosing(
   fastify: FastifyInstance,
@@ -533,13 +564,11 @@ export async function closeWeeklyClosing(
   }
 
   // Sección 7/9 del prompt: se copian DIRECTAMENTE de `InventoryCountItem`
-  // (vía `computeLiveItems`), nunca se recalculan acá.
+  // (vía `computeLiveItems`), nunca se recalculan acá. Seguro leerlos antes
+  // de abrir la transacción -- ver el comentario de esta función sobre por
+  // qué un `InventoryCount` COMPLETED es terminal.
   const items = await computeLiveItems(fastify, organizationId, governing);
-  const products = await fastify.db.product.findMany({
-    where: { organizationId, id: { in: items.map((item) => item.productId) } },
-    select: { id: true, unitOfMeasureId: true },
-  });
-  const productById = new Map(products.map((p) => [p.id, p]));
+  const productIds = items.map((item) => item.productId);
 
   try {
     await fastify.db.$transaction(async (tx) => {
@@ -570,52 +599,69 @@ export async function closeWeeklyClosing(
       });
       const revision = updatedClosing.currentRevision;
 
+      // Sección 8 del prompt Etapa 6.1: los productos y las correcciones ya
+      // aplicadas se cargan DENTRO de la transacción -- la decisión de qué
+      // `COUNT_CORRECTION` corresponde a cada producto es parte de la misma
+      // operación atómica que el resto del cierre.
+      const products = await tx.product.findMany({
+        where: { organizationId, id: { in: productIds } },
+        select: { id: true, unitOfMeasureId: true },
+      });
+      const productById = new Map(products.map((p) => [p.id, p]));
+
+      // Trazabilidad persistida (sección 7 del prompt Etapa 6.1): un mismo
+      // `WeeklyClosing` (id constante a través de sus revisiones) sólo
+      // puede tener, como mucho, un COUNT_CORRECTION por producto en toda
+      // su vida -- se busca acá si ya existe ANTES de decidir si hace
+      // falta crear uno nuevo. Nunca se infiere comparando contra el saldo
+      // actual del ledger (eso absorbería movimientos legítimos -ventas,
+      // mermas- ocurridos después del conteo como si fueran parte de la
+      // diferencia física detectada por ese conteo).
+      const existingCorrections = await tx.inventoryMovement.findMany({
+        where: {
+          organizationId,
+          locationId: closing.locationId,
+          movementType: 'COUNT_CORRECTION',
+          sourceDocumentType: 'WEEKLY_CLOSING',
+          sourceDocumentId: id,
+          productId: { in: productIds },
+        },
+        select: { id: true, productId: true },
+      });
+      const existingCorrectionMovementIdByProduct = new Map(
+        existingCorrections.map((m) => [m.productId, m.id]),
+      );
+
       let correctionsCreated = 0;
       for (const item of items) {
+        const product = productById.get(item.productId);
+        if (!product) {
+          // Sección 10 del prompt Etapa 6.1: nunca omitir en silencio un
+          // producto que no puede resolverse -- todo el cierre debe
+          // fallar (ROLLBACK completo: nada queda CLOSED, ningún snapshot
+          // ni COUNT_CORRECTION parcial, ninguna auditoría).
+          throw new InternalError(
+            `No se pudo resolver el producto ${item.productId} del conteo gobernante al cerrar la semana; se abortó el cierre completo.`,
+          );
+        }
+
         // `item.difference` es la diferencia HISTÓRICA congelada al momento
-        // del conteo (real - teórico EN ESE MOMENTO) -- se preserva SIEMPRE
-        // en el snapshot, sin importar la revisión (documento del cliente,
-        // sección 16.1: "la diferencia histórica se conserva").
-        //
-        // El AJUSTE que efectivamente se aplica al ledger es otra cosa: se
-        // calcula acá, DENTRO de la transacción, como (real contado -
-        // teórico VIGENTE del ledger en este instante) -- nunca reutilizando
-        // directamente `item.difference`. Esto es lo que evita duplicar el
-        // ajuste si esta semana se cierra más de una vez (reapertura +
-        // recierre, sección 12 del prompt): la primera vez que se cierra,
-        // el teórico vigente coincide con el teórico congelado del conteo,
-        // así que el ajuste aplicado es igual a la diferencia histórica; en
-        // un recierre posterior SIN un conteo nuevo, el teórico vigente ya
-        // quedó reconciliado por el COUNT_CORRECTION anterior (documento
-        // del cliente, sección 16.1: "el real pasa a ser el nuevo punto de
-        // partida operativo"), así que el ajuste pendiente da CERO y no se
-        // genera un segundo movimiento -- sin este cálculo, recerrar
-        // aplicaría la misma corrección dos veces y dejaría el stock mal.
-        const quantityReal = new Prisma.Decimal(item.quantityReal);
+        // del conteo (real - teórico EN ESE MOMENTO, sección 16.1 del
+        // documento del cliente: "la diferencia histórica se conserva") --
+        // es SIEMPRE el valor que se aplica como ajuste, sin importar
+        // cuántas veces se recierre esta semana.
         const historicalDifference = new Prisma.Decimal(item.difference);
-        const currentTheoretical = await tx.inventoryMovement.aggregate({
-          where: { organizationId, locationId: closing.locationId, productId: item.productId },
-          _sum: { quantity: true },
-        });
-        const liveTheoretical = currentTheoretical._sum.quantity ?? new Prisma.Decimal(0);
-        const pendingAdjustment = quantityReal.sub(liveTheoretical);
 
-        let countCorrectionMovementId: string | null = null;
+        let countCorrectionMovementId = existingCorrectionMovementIdByProduct.get(item.productId);
 
-        // Sección 8 del prompt: NUNCA se genera un ajuste cuando no queda
-        // diferencia pendiente por reconciliar.
-        if (!pendingAdjustment.isZero()) {
-          const product = productById.get(item.productId);
-          if (!product) {
-            fastify.log.error(
-              { organizationId, productId: item.productId },
-              'Etapa 6: producto del conteo gobernante no encontrado al cerrar (dato inconsistente)',
-            );
-            continue;
-          }
-          // `pendingAdjustment` ya está en unidad CANÓNICA (mismo concepto
-          // que `InventoryMovement.quantity`). Se registra con
-          // `conversionFactor = 1` y `enteredQuantity = pendingAdjustment`
+        // Sección 8 del prompt: NUNCA se genera un ajuste cuando la
+        // diferencia histórica es cero, y NUNCA se genera un segundo
+        // ajuste cuando este cierre ya tiene uno para este producto (ver
+        // arriba) -- la nueva revisión reutiliza la MISMA referencia.
+        if (countCorrectionMovementId === undefined && !historicalDifference.isZero()) {
+          // `historicalDifference` ya está en unidad CANÓNICA (mismo
+          // concepto que `InventoryMovement.quantity`). Se registra con
+          // `conversionFactor = 1` y `enteredQuantity = historicalDifference`
           // (en vez de convertir a la unidad de manejo del producto vía
           // `unitsPerHandlingUnit`) para que `quantity = enteredQuantity *
           // conversionFactor` sea EXACTO, sin ninguna división/multiplicación
@@ -632,8 +678,8 @@ export async function closeWeeklyClosing(
               locationId: closing.locationId,
               productId: item.productId,
               movementType: 'COUNT_CORRECTION',
-              quantity: pendingAdjustment,
-              enteredQuantity: pendingAdjustment,
+              quantity: historicalDifference,
+              enteredQuantity: historicalDifference,
               entryUnitOfMeasureId: product.unitOfMeasureId,
               conversionFactor: 1,
               reason: `Ajuste automático del cierre semanal ${toIsoDate(closing.periodStart)}..${toIsoDate(closing.periodEnd)} (revisión ${revision})`,
@@ -654,9 +700,9 @@ export async function closeWeeklyClosing(
             productId: item.productId,
             revision,
             quantityTheoretical: new Prisma.Decimal(item.quantityTheoretical),
-            quantityReal,
+            quantityReal: new Prisma.Decimal(item.quantityReal),
             difference: historicalDifference,
-            countCorrectionMovementId,
+            countCorrectionMovementId: countCorrectionMovementId ?? null,
           },
         });
       }

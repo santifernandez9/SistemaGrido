@@ -8,6 +8,7 @@ const { buildServer } = await import('../server.js');
 const { prisma } = await import('@sistema-grido/db');
 const { resetCoreTables, seedOrganization, seedRoles, seedProductTypes, seedUnitsOfMeasure } =
   await import('../test/db-helpers.js');
+const { closeWeeklyClosing } = await import('../services/weekly-closing.js');
 
 /**
  * Tests del Cierre Semanal del núcleo operativo (Etapa 6) -- ver
@@ -674,14 +675,23 @@ describe('/api/weekly-closings', () => {
       // El ajuste YA fue aplicado al ledger en la primera revisión -- el
       // recierre (sin un conteo nuevo) no debe generar un segundo
       // COUNT_CORRECTION que duplique el ajuste sobre el mismo stock.
+      // Sigue habiendo exactamente 3 movimientos (A, B, D -- C con
+      // diferencia cero nunca generó ninguno).
       const corrections = await prisma.inventoryMovement.findMany({
         where: { organizationId, locationId: locationShop, movementType: 'COUNT_CORRECTION' },
       });
       expect(corrections).toHaveLength(3);
-      const revision2SnapshotWithCorrection = revision2.filter(
-        (i) => i.countCorrectionMovementId !== null,
+      // La revisión 2 REUTILIZA la misma referencia de movimiento que la
+      // revisión 1 para cada producto (nunca las deja en null ni apunta a
+      // un movimiento nuevo) -- es la trazabilidad persistida que evita
+      // duplicar el ajuste (sección 7 del prompt de Etapa 6.1).
+      const correctionByProductRev1 = new Map(
+        revision1.map((i) => [i.productId, i.countCorrectionMovementId]),
       );
-      expect(revision2SnapshotWithCorrection).toHaveLength(0);
+      const correctionByProductRev2 = new Map(
+        revision2.map((i) => [i.productId, i.countCorrectionMovementId]),
+      );
+      expect(correctionByProductRev2).toEqual(correctionByProductRev1);
 
       const balance = await app.inject({
         method: 'GET',
@@ -733,6 +743,251 @@ describe('/api/weekly-closings', () => {
         headers: { authorization: 'Bearer otra-org-token' },
       });
       expect(response.statusCode).toBe(404);
+    });
+  });
+
+  // --- Etapa 6.1 -- consistencia temporal de la reconciliación -------------
+
+  /**
+   * Etapa 6.1: corrige una carrera real en `closeWeeklyClosing` -- la
+   * versión de Etapa 6 calculaba el ajuste como
+   * `quantityReal - saldoVigenteDelLedger`, lo que podía absorber, como si
+   * fueran parte de la diferencia física del conteo, movimientos legítimos
+   * (ventas, mermas, otros ajustes) ocurridos DESPUÉS del conteo. Ahora el
+   * ajuste es SIEMPRE la diferencia histórica congelada del conteo, y la
+   * reconciliación "ya aplicada" se determina por trazabilidad persistida
+   * (`InventoryMovement.sourceDocumentType`/`sourceDocumentId`), nunca
+   * comparando contra el saldo actual. Estos tests reproducen exactamente
+   * los escenarios señalados en la corrección.
+   */
+  describe('Etapa 6.1 — consistencia temporal de la reconciliación', () => {
+    async function createAdjustment(productId: string, enteredQuantity: string, reason: string) {
+      return app.inject({
+        method: 'POST',
+        url: '/api/inventory/adjustments',
+        headers: adminAuthHeader,
+        payload: { locationId: locationShop, productId, enteredQuantity, reason },
+      });
+    }
+
+    async function stockOf(productId: string): Promise<string | undefined> {
+      const response = await app.inject({
+        method: 'GET',
+        url: `/api/inventory/stock?locationId=${locationShop}`,
+        headers: adminAuthHeader,
+      });
+      const balances = response.json().data as Array<{ productId: string; quantity: string }>;
+      return balances.find((b) => b.productId === productId)?.quantity;
+    }
+
+    it('TEST A — un movimiento legítimo posterior al conteo (pero antes del cierre) no se absorbe como diferencia del conteo', async () => {
+      const id = await readyToClose();
+
+      // Después de que el conteo ya quedó COMPLETED (real 12, teórico 10,
+      // diferencia +2 para productA) pero ANTES de cerrar, ocurre una venta
+      // legítima: stock 10 -> 7.
+      const saleResponse = await createAdjustment(productA, '-3', 'Venta simulada post-conteo');
+      expect(saleResponse.statusCode).toBe(201);
+      expect(await stockOf(productA)).toBe('7.000');
+
+      const closeResponse = await closeClosing(id, 'cierre-test-a');
+      expect(closeResponse.statusCode).toBe(200);
+
+      // El COUNT_CORRECTION sigue representando ÚNICAMENTE la diferencia
+      // histórica del conteo (+2) -- nunca `12 - 7 = 5`.
+      const correction = await prisma.inventoryMovement.findFirst({
+        where: {
+          organizationId,
+          locationId: locationShop,
+          productId: productA,
+          movementType: 'COUNT_CORRECTION',
+        },
+      });
+      expect(correction?.quantity.toFixed(3)).toBe('2.000');
+
+      // El efecto de la venta se conserva de forma independiente: 7 + 2 = 9
+      // (nunca 12, que sería el resultado si el ajuste hubiese absorbido la
+      // venta como si fuera parte de la diferencia física).
+      expect(await stockOf(productA)).toBe('9.000');
+    });
+
+    it('TEST B — reapertura con movimiento posterior: recerrar no duplica el ajuste ni revierte el movimiento legítimo', async () => {
+      const id = await readyToClose();
+      await closeClosing(id, 'cierre-test-b-1');
+      expect(await stockOf(productA)).toBe('12.000'); // 10 inicial + 2 de ajuste
+
+      // Venta legítima DESPUÉS del primer cierre.
+      const saleResponse = await createAdjustment(productA, '-3', 'Venta simulada post-cierre');
+      expect(saleResponse.statusCode).toBe(201);
+      expect(await stockOf(productA)).toBe('9.000');
+
+      await reopenClosing(id, 'Revisar antes de recerrar');
+      await confirmReview(id);
+      const secondClose = await closeClosing(id, 'cierre-test-b-2');
+      expect(secondClose.statusCode).toBe(200);
+      expect(secondClose.json().data.closing.currentRevision).toBe(2);
+
+      // Sigue existiendo UN SOLO COUNT_CORRECTION para productA (no dos).
+      const corrections = await prisma.inventoryMovement.findMany({
+        where: {
+          organizationId,
+          locationId: locationShop,
+          productId: productA,
+          movementType: 'COUNT_CORRECTION',
+        },
+      });
+      expect(corrections).toHaveLength(1);
+
+      // El stock final CONSERVA el efecto de la venta -- nunca vuelve a 12
+      // (que sería el resultado de duplicar el +2) ni a 10 (que sería el
+      // resultado de "deshacer" la venta).
+      expect(await stockOf(productA)).toBe('9.000');
+
+      // Ambas revisiones muestran la MISMA diferencia histórica (+2) y
+      // referencian el MISMO movimiento de corrección.
+      const revision1 = await prisma.inventorySnapshotItem.findFirst({
+        where: { weeklyClosingId: id, productId: productA, revision: 1 },
+      });
+      const revision2 = await prisma.inventorySnapshotItem.findFirst({
+        where: { weeklyClosingId: id, productId: productA, revision: 2 },
+      });
+      expect(revision2?.difference.toFixed(3)).toBe(revision1?.difference.toFixed(3));
+      expect(revision2?.countCorrectionMovementId).toBe(revision1?.countCorrectionMovementId);
+    });
+
+    it('TEST C — un producto del conteo gobernante que no puede resolverse hace fallar TODO el cierre (rollback completo)', async () => {
+      const id = await readyToClose();
+
+      // Fastify "roto" a propósito: SÓLO intercepta `tx.product.findMany`
+      // para simular que un producto del conteo gobernante no se pudo
+      // resolver -- todo lo demás (auditoría, resto de Prisma) sigue
+      // siendo real, para que el resto de la lógica corra tal cual en
+      // producción.
+      const brokenDb = new Proxy(prisma, {
+        get(target, prop, receiver) {
+          if (prop === '$transaction') {
+            return (callback: (tx: unknown) => unknown, options?: unknown) =>
+              (target.$transaction as (cb: (tx: unknown) => unknown, opts?: unknown) => unknown)(
+                (tx: Record<string, unknown>) => {
+                  const brokenTx = new Proxy(tx, {
+                    get(txTarget, txProp, txReceiver) {
+                      if (txProp === 'product') {
+                        const productDelegate = txTarget.product as Record<string, unknown>;
+                        return new Proxy(productDelegate, {
+                          get(prodTarget, prodProp) {
+                            if (prodProp === 'findMany') {
+                              return async () => [];
+                            }
+                            return Reflect.get(prodTarget, prodProp);
+                          },
+                        });
+                      }
+                      return Reflect.get(txTarget, txProp, txReceiver);
+                    },
+                  });
+                  return callback(brokenTx);
+                },
+                options,
+              );
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+      const brokenFastify = new Proxy(app, {
+        get(target, prop, receiver) {
+          if (prop === 'db') return brokenDb;
+          return Reflect.get(target, prop, receiver);
+        },
+      }) as unknown as FastifyInstance;
+
+      const admin = await prisma.appUser.findFirstOrThrow({ where: { id: adminUserId } });
+      const actor = {
+        id: admin.id,
+        organizationId,
+        roleCode: 'ADMIN' as const,
+        defaultLocationId: admin.defaultLocationId,
+        displayName: admin.displayName,
+        email: admin.email,
+      };
+
+      await expect(
+        closeWeeklyClosing(brokenFastify, organizationId, actor, id, {
+          idempotencyKey: 'cierre-test-c',
+        }),
+      ).rejects.toThrow();
+
+      // Rollback completo: nada quedó CLOSED, ni parcial ni totalmente.
+      const closing = await prisma.weeklyClosing.findUniqueOrThrow({ where: { id } });
+      expect(closing.status).not.toBe('CLOSED');
+      expect(closing.currentRevision).toBe(0);
+      expect(closing.closeIdempotencyKey).toBeNull();
+      const snapshotCount = await prisma.inventorySnapshotItem.count({
+        where: { weeklyClosingId: id },
+      });
+      expect(snapshotCount).toBe(0);
+      const correctionCount = await prisma.inventoryMovement.count({
+        where: { organizationId, movementType: 'COUNT_CORRECTION' },
+      });
+      expect(correctionCount).toBe(0);
+      const auditCount = await prisma.auditLog.count({
+        where: { entityId: id, action: 'WEEKLY_CLOSING_CLOSED' },
+      });
+      expect(auditCount).toBe(0);
+
+      // El cierre sigue siendo operable normalmente después (no quedó en un
+      // estado intermedio corrupto): con el `db` real puede cerrarse bien.
+      const realClose = await closeClosing(id, 'cierre-test-c-retry');
+      expect(realClose.statusCode).toBe(200);
+    });
+
+    it('TEST D — dos solicitudes de cierre concurrentes generan un único conjunto de correcciones (sin duplicar)', async () => {
+      const id = await readyToClose();
+      const [r1, r2] = await Promise.all([
+        closeClosing(id, 'cierre-test-d'),
+        closeClosing(id, 'cierre-test-d'),
+      ]);
+      expect([r1.statusCode, r2.statusCode].every((s) => s === 200)).toBe(true);
+
+      const corrections = await prisma.inventoryMovement.findMany({
+        where: { organizationId, locationId: locationShop, movementType: 'COUNT_CORRECTION' },
+      });
+      expect(corrections).toHaveLength(3);
+      // A lo sumo un movimiento por producto (garantía del UNIQUE parcial
+      // agregado en la migración de Etapa 6.1).
+      const productIdsWithCorrection = corrections.map((c) => c.productId);
+      expect(new Set(productIdsWithCorrection).size).toBe(productIdsWithCorrection.length);
+
+      const auditCount = await prisma.auditLog.count({
+        where: { entityId: id, action: 'WEEKLY_CLOSING_CLOSED' },
+      });
+      expect(auditCount).toBe(1);
+    });
+
+    it('TEST E — un movimiento concurrente durante el cierre nunca se absorbe como diferencia de conteo (resultado determinístico)', async () => {
+      const id = await readyToClose();
+
+      const [closeResponse, saleResponse] = await Promise.all([
+        closeClosing(id, 'cierre-test-e'),
+        createAdjustment(productA, '-3', 'Venta concurrente con el cierre'),
+      ]);
+      expect(closeResponse.statusCode).toBe(200);
+      expect(saleResponse.statusCode).toBe(201);
+
+      // El COUNT_CORRECTION sigue siendo exactamente +2, sin importar el
+      // orden real de ejecución entre el cierre y la venta concurrente.
+      const correction = await prisma.inventoryMovement.findFirst({
+        where: {
+          organizationId,
+          locationId: locationShop,
+          productId: productA,
+          movementType: 'COUNT_CORRECTION',
+        },
+      });
+      expect(correction?.quantity.toFixed(3)).toBe('2.000');
+
+      // El resultado final es determinístico independientemente del orden:
+      // 10 (inicial) + 2 (corrección histórica) - 3 (venta) = 9.
+      expect(await stockOf(productA)).toBe('9.000');
     });
   });
 });
