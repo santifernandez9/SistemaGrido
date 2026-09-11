@@ -5,19 +5,23 @@ services:
     region: oregon
     plan: free
     rootDir: .
-    # Compila packages/shared-types y genera el cliente de Prisma. Normalmente
-    # NO corre migraciones acá a propósito (docs/ETAPA-2-CATALOGO-MAESTROS.md,
-    # sección "Migraciones en staging"): aplicarlas es un paso manual y
-    # controlado, no automático en cada deploy.
+    # Compila packages/shared-types y genera el cliente de Prisma. NO corre
+    # migraciones acá a propósito (docs/ETAPA-2-CATALOGO-MAESTROS.md, sección
+    # "Migraciones en staging" -- ampliado en docs/ETAPA-6.2-CIERRE-INTEGRAL.md,
+    # sección "Staging/Pilot readiness"): aplicarlas es un paso MANUAL y
+    # controlado, nunca automático en cada deploy.
     #
-    # EXCEPCIÓN TEMPORAL (setup inicial del primer entorno, a pedido del
-    # usuario para evitar instalar Node localmente): este build también
-    # corre `migrate:deploy` + `seed` UNA VEZ para levantar el esquema y los
-    # datos base contra un Supabase recién creado. Sacar estas dos líneas del
-    # buildCommand apenas el primer deploy termine bien -- dejarlas
-    # permanentemente reseedearía (sin destruir datos, el seed es idempotente
-    # por upsert, pero igual es innecesario) en cada deploy futuro.
-    buildCommand: npm ci && npm run build --workspace packages/shared-types && npm run generate --workspace packages/db && npm run migrate:deploy --workspace packages/db && npm run seed --workspace packages/db
+    # Etapa 6.2, sección 22 del prompt: la excepción temporal que agregaba
+    # `migrate:deploy` + `seed` acá (bootstrap del primer Supabase recién
+    # creado, sin Node local) ya cumplió su propósito -- el primer deploy
+    # funcionó y el usuario confirmó login exitoso. Se revierte para volver
+    # al flujo manual documentado: cada migración nueva (incluida la de
+    # Etapa 6.2) se aplica a mano con `npx prisma migrate deploy` apuntando
+    # a `DATABASE_URL`/`DIRECT_URL` de Supabase, ANTES de este deploy, nunca
+    # de forma automática. Dejarlo automático reseedearía (sin destruir
+    # datos, el seed es idempotente por upsert, pero igual es innecesario e
+    # imprevisible) en cada deploy futuro.
+    buildCommand: npm ci && npm run build --workspace packages/shared-types && npm run generate --workspace packages/db
     # Prisma 6 con el generador `prisma-client` emite el cliente como fuente TS
     # (no JS precompilado) -- el backend corre con tsx en desarrollo Y en
     # producción, ver docs/ETAPA-1-BASE-CORE.md, sección "Decisiones técnicas".

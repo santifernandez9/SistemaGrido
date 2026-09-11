@@ -19,6 +19,18 @@ Versión: 1.1 · Rama: `claude/etapa-6-cierre-semanal`
 > cierre (rollback completo). Ver la sección "Etapa 6.1" más abajo para el
 > detalle completo.
 
+> **Actualización — Etapa 6.2 (cierre integral del Hito 1).** Este cierre
+> semanal por ubicación ahora es un componente de un alcance mucho más
+> amplio: modelo histórico de precios/costos, reconteo obligatorio por
+> faltante ≥25%, revisión de sobrantes, detección de posible error de
+> tipeo, valorización congelada del stock con costo C/IVA vigente, y un
+> cierre semanal GENERAL a nivel organización (todas las heladerías
+> requeridas). Ninguna garantía de esta etapa (Etapa 6) ni de Etapa 6.1 se
+> modificó de fondo -- sólo se le agregaron las tres columnas de
+> valorización a `InventorySnapshotItem` y el chequeo de costo faltante al
+> checklist. Ver `docs/ETAPA-6.2-CIERRE-INTEGRAL.md` para el detalle
+> completo.
+
 ## 1. Fuente de verdad
 
 Único material fuente: `sistema_grido.zip`, en particular "Informe Corregido Grido Stock
@@ -242,6 +254,14 @@ Antes de implementar la parte monetaria del snapshot se verificaron, en este ord
 `Product`, el snapshot de valoración se podrá agregar como una migración nueva
 (`InventorySnapshotItem` ganaría columnas opcionales) sin tocar la lógica de cierre ya
 construida acá.
+
+> **Resuelto en Etapa 6.2.** Los dos archivos reales de listas de precios/
+> costos de Grido llegaron como evidencia nueva; se construyó el modelo
+> histórico de precios/costos completo (`PriceReference`/`PriceValue`/
+> `PriceReferenceProductMapping`) y `InventorySnapshotItem` ganó
+> `unitCostWithTax`/`totalValue`/`priceValueId`, exactamente como se
+> anticipaba acá (migración nueva, sin tocar esta lógica de cierre). Ver
+> `docs/ETAPA-6.2-CIERRE-INTEGRAL.md`, secciones 2 y 8.
 
 ## 11. Idempotencia
 
