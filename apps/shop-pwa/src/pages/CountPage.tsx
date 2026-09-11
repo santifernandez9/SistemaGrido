@@ -5,6 +5,7 @@ import {
   OPEN_CONTAINER_FRACTIONS,
   type InventoryCount,
   type InventoryCountDraftItem,
+  type InventoryCountItemResult,
   type OpenContainerFraction,
   type Product,
 } from '@sistema-grido/shared-types';
@@ -27,14 +28,76 @@ const FRACTION_LABELS: Record<OpenContainerFraction, string> = {
 
 type Phase = 'loading' | 'counting' | 'recounting' | 'done' | 'blocked';
 
+function toNumberOrUndefined(raw: string): number | undefined {
+  if (raw.trim() === '') return undefined;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : undefined;
+}
+
+/** Un ítem "cuenta" para el progreso/envío apenas tiene alguna cantidad
+ * cargada -- las 3 líneas del papel real (Salón cerrada/abierta, Depósito)
+ * son independientes entre sí (RN, sección 4 del prompt de Etapa 6.2.1). */
+function isItemCounted(item: InventoryCountDraftItem | undefined): boolean {
+  if (!item) return false;
+  return (
+    item.closedUnits !== undefined ||
+    item.openUnits !== undefined ||
+    item.depositoClosedUnits !== undefined
+  );
+}
+
+/** Sólo un sabor de helado (`flavorId !== null`) tiene la 3ra línea
+ * "Depósito" del papel real -- nunca un insumo/producto cerrado. */
+function isFlavorProduct(product: Product): boolean {
+  return product.flavorId !== null;
+}
+
+/** El campo "Sueltos" es redundante cuando la unidad de manejo YA es la
+ * unidad atómica (`unitsPerHandlingUnit === 1`) para un producto que no es
+ * sabor -- ahí sólo "Cerrados" tiene sentido. Todo sabor, en cambio, siempre
+ * tiene sueltos/abiertos (la 2da línea del papel real, "Salón - abierta"). */
+function showsLooseField(product: Product): boolean {
+  return product.unitsPerHandlingUnit > 1 || isFlavorProduct(product);
+}
+
+interface CategoryGroup {
+  category: string;
+  products: Product[];
+}
+
+/** Agrupa por `categoryName` tal cual viene del catálogo -- nunca una lista
+ * fija en el código: un rubro nuevo cargado por un admin aparece solo, sin
+ * tocar esta pantalla (sección 1 del prompt de Etapa 6.2.1). */
+function groupByCategory(products: Product[]): CategoryGroup[] {
+  const byCategory = new Map<string, Product[]>();
+  for (const product of products) {
+    const list = byCategory.get(product.categoryName) ?? [];
+    list.push(product);
+    byCategory.set(product.categoryName, list);
+  }
+  return [...byCategory.entries()]
+    .map(([category, list]) => ({
+      category,
+      products: [...list].sort((a, b) => a.name.localeCompare(b.name, 'es')),
+    }))
+    .sort((a, b) => a.category.localeCompare(b.category, 'es'));
+}
+
 /**
  * Conteo físico semanal (RF-012/RF-020), CIEGO (RN-012): en ningún momento
- * mientras se cuenta se pide ni se muestra el stock teórico -- esta pantalla
- * nunca llama a `/api/inventory/stock`. El borrador vive en IndexedDB
- * (`../lib/countDraftStore.ts`, RN-013: "sobrevivir a un corte de conexión,
- * recarga accidental o cierre de la app") y sólo se borra después de que el
- * backend confirma el envío -- ver docs/ETAPA-4-APP-HELADERIA.md,
+ * mientras se cuenta o se recuenta se pide ni se muestra el stock teórico ni
+ * la diferencia -- esta pantalla nunca llama a `/api/inventory/stock` ni
+ * muestra esos campos de la respuesta del envío. El borrador vive en
+ * IndexedDB (`../lib/countDraftStore.ts`, RN-013: "sobrevivir a un corte de
+ * conexión, recarga accidental o cierre de la app") y sólo se borra después
+ * de que el backend confirma el envío -- ver docs/ETAPA-4-APP-HELADERIA.md,
  * "Autoguardado".
+ *
+ * Etapa 6.2.1: adaptada a las planillas de papel reales del cliente --
+ * agrupada por rubro (`categoryName`) y, para cada sabor de helado, con la
+ * 3ra línea "Depósito" (cámara propia de esa misma heladería) además de
+ * "Salón - cerrada/abierta". Todo lo que se agrupa o etiqueta sale del
+ * catálogo (`Product`), nunca de un nombre hardcodeado.
  */
 export function CountPage() {
   const { user, api } = useAuth();
@@ -99,6 +162,8 @@ export function CountPage() {
 
   // Autoguardado: cada cambio se persiste en IndexedDB de inmediato -- nunca
   // se espera al envío para no perder nada ante un corte o un cierre.
+  // Todos los ítems viven en un único estado (no por sección/categoría), así
+  // que cambiar de sección nunca pierde lo ya tipeado en otra.
   useEffect(() => {
     if (!loadedRef.current || !draftId || !locationId) return;
     void saveCountDraft({
@@ -118,19 +183,22 @@ export function CountPage() {
     });
   }, []);
 
-  function toNumberOrUndefined(raw: string): number | undefined {
-    if (raw.trim() === '') return undefined;
-    const n = Number(raw);
-    return Number.isInteger(n) && n >= 0 ? n : undefined;
-  }
+  const grouped = useMemo(() => groupByCategory(products), [products]);
+  const countedTotal = useMemo(
+    () => products.filter((p) => isItemCounted(items[p.id])).length,
+    [products, items],
+  );
 
   async function handleSubmit() {
     setError(null);
-    const submittedItems = Object.values(items).filter(
-      (item) => item.closedUnits !== undefined || item.openUnits !== undefined,
-    );
+    const submittedItems = Object.values(items).filter(isItemCounted);
     if (submittedItems.length === 0) {
       setError('Contá al menos un producto antes de enviar.');
+      return;
+    }
+    const validationError = findMissingFraction(products, submittedItems);
+    if (validationError) {
+      setError(validationError);
       return;
     }
     if (!locationId || !draftId) return;
@@ -172,7 +240,7 @@ export function CountPage() {
   }
 
   if (phase === 'recounting' && result) {
-    return <RecountStep count={result} onDone={() => setPhase('done')} />;
+    return <RecountStep count={result} products={products} onDone={() => setPhase('done')} />;
   }
 
   if (phase === 'done') {
@@ -189,21 +257,23 @@ export function CountPage() {
     <div className="page">
       <h1>Conteo físico semanal</h1>
       <p className="muted">
-        Semana del {weekStart}. Contá cada producto una sola vez -- lo que ya cargaste se guarda
+        Semana del {weekStart} · Contado por {user?.displayName}. Lo que ya cargaste se guarda
         automáticamente en este dispositivo, aunque se corte la conexión o cierres la app.
       </p>
 
-      <ul className="count-list">
-        {products.map((product) => (
-          <CountRow
-            key={product.id}
-            product={product}
-            item={items[product.id]}
-            onChange={(patch) => updateItem(product.id, patch)}
-            toNumberOrUndefined={toNumberOrUndefined}
-          />
-        ))}
-      </ul>
+      {grouped.map((group) => (
+        <CategorySection
+          key={group.category}
+          category={group.category}
+          products={group.products}
+          items={items}
+          onChangeItem={updateItem}
+        />
+      ))}
+
+      <p className="muted">
+        {countedTotal} de {products.length} productos contados en total.
+      </p>
 
       {error && (
         <p className="error" role="alert">
@@ -220,27 +290,121 @@ export function CountPage() {
   );
 }
 
+/** Mirroría del lado del cliente de la validación del backend (RN-025,
+ * `apps/api/src/services/inventory-count.ts`, `computeItem`): un sabor con
+ * unidades abiertas necesita la fracción estimada. Evita un viaje al
+ * servidor para un error que ya se puede detectar acá -- el backend sigue
+ * siendo quien realmente lo exige. */
+function findMissingFraction(
+  products: Product[],
+  submittedItems: InventoryCountDraftItem[],
+): string | null {
+  const byId = new Map(products.map((p) => [p.id, p]));
+  for (const item of submittedItems) {
+    const product = byId.get(item.productId);
+    if (!product || !isFlavorProduct(product)) continue;
+    if (item.openUnits && item.openUnits > 0 && !item.openFraction) {
+      return `Falta indicar la fracción estimada de lo abierto en el Salón para "${product.name}".`;
+    }
+  }
+  return null;
+}
+
+function CategorySection({
+  category,
+  products,
+  items,
+  onChangeItem,
+}: {
+  category: string;
+  products: Product[];
+  items: Record<string, InventoryCountDraftItem>;
+  onChangeItem: (productId: string, patch: Partial<InventoryCountDraftItem>) => void;
+}) {
+  const counted = products.filter((p) => isItemCounted(items[p.id])).length;
+
+  return (
+    <details className="card count-category">
+      <summary className="count-category-summary">
+        <strong>{category}</strong>
+        <span className="muted">
+          {counted}/{products.length} contados
+        </span>
+      </summary>
+      <ul className="count-list">
+        {products.map((product) => (
+          <CountRow
+            key={product.id}
+            product={product}
+            item={items[product.id]}
+            onChange={(patch) => onChangeItem(product.id, patch)}
+          />
+        ))}
+      </ul>
+    </details>
+  );
+}
+
 function CountRow({
   product,
   item,
   onChange,
-  toNumberOrUndefined,
 }: {
   product: Product;
   item: InventoryCountDraftItem | undefined;
   onChange: (patch: Partial<InventoryCountDraftItem>) => void;
-  toNumberOrUndefined: (raw: string) => number | undefined;
 }) {
-  const isFlavor = product.flavorId !== null;
-  const openUnits = item?.openUnits ?? undefined;
-
   return (
     <li className="card count-row">
       <strong>{product.name}</strong>
-      <span className="muted">{product.unitOfMeasureName}</span>
+      <QuantityFields
+        isFlavor={isFlavorProduct(product)}
+        showsLoose={showsLooseField(product)}
+        unitOfMeasureName={product.unitOfMeasureName}
+        item={item}
+        onChange={onChange}
+      />
+    </li>
+  );
+}
+
+/**
+ * Los 3 campos posibles de una línea de conteo (sección 1/2 del prompt de
+ * Etapa 6.2.1, mismos que la planilla de papel real): "Cerrados"/"Salón -
+ * cerrada" siempre; "Sueltos"/"Salón - abierta" sólo cuando corresponde
+ * (`showsLoose`); la fracción estimada sólo para un sabor con abiertos > 0;
+ * y "Depósito" sólo para un sabor (3ra línea, exclusiva de sabores).
+ * Compartido entre el conteo principal y el reconteo para no duplicar esta
+ * lógica en dos lugares.
+ */
+function QuantityFields({
+  isFlavor,
+  showsLoose,
+  unitOfMeasureName,
+  item,
+  onChange,
+}: {
+  isFlavor: boolean;
+  showsLoose: boolean;
+  unitOfMeasureName: string;
+  item: InventoryCountDraftItem | undefined;
+  onChange: (patch: Partial<InventoryCountDraftItem>) => void;
+}) {
+  const openUnits = item?.openUnits ?? undefined;
+  const closedLabel = isFlavor ? `Salón - cerrada (${unitOfMeasureName})` : `Cerrados (${unitOfMeasureName})`;
+  const openLabel = isFlavor ? 'Salón - abierta' : 'Sueltos';
+
+  return (
+    <>
+      {isFlavor && (
+        <p className="muted count-caption">
+          Salón: lo que está en la heladera de venta. Depósito: lo guardado en la cámara propia de
+          esta heladería.
+        </p>
+      )}
       <div className="count-fields">
         <label>
-          Cerrados ({product.unitOfMeasureName})
+          {closedLabel}
           <input
             type="number"
             inputMode="numeric"
@@ -250,23 +414,25 @@ function CountRow({
             onChange={(event) => onChange({ closedUnits: toNumberOrUndefined(event.target.value) })}
           />
         </label>
-        <label>
-          Sueltos / abiertos
-          <input
-            type="number"
-            inputMode="numeric"
-            min={0}
-            step={1}
-            value={item?.openUnits ?? ''}
-            onChange={(event) => {
-              const value = toNumberOrUndefined(event.target.value);
-              onChange({
-                openUnits: value,
-                openFraction: value && value > 0 ? item?.openFraction : undefined,
-              });
-            }}
-          />
-        </label>
+        {showsLoose && (
+          <label>
+            {openLabel}
+            <input
+              type="number"
+              inputMode="numeric"
+              min={0}
+              step={1}
+              value={item?.openUnits ?? ''}
+              onChange={(event) => {
+                const value = toNumberOrUndefined(event.target.value);
+                onChange({
+                  openUnits: value,
+                  openFraction: value && value > 0 ? item?.openFraction : undefined,
+                });
+              }}
+            />
+          </label>
+        )}
         {isFlavor && !!openUnits && openUnits > 0 && (
           <label>
             Fracción estimada de lo abierto
@@ -287,45 +453,50 @@ function CountRow({
             </select>
           </label>
         )}
+        {isFlavor && (
+          <label>
+            Depósito ({unitOfMeasureName} cerradas)
+            <input
+              type="number"
+              inputMode="numeric"
+              min={0}
+              step={1}
+              value={item?.depositoClosedUnits ?? ''}
+              onChange={(event) =>
+                onChange({ depositoClosedUnits: toNumberOrUndefined(event.target.value) })
+              }
+            />
+          </label>
+        )}
       </div>
-    </li>
+    </>
   );
 }
 
 /**
  * Reconteo (sección 5 del prompt): sólo los productos marcados
  * `needsRecount` en la respuesta del envío original -- un único reenvío
- * adicional, no un loop. Ya no es ciego (el envío original ya respondió),
- * pero tampoco hace falta mostrar la diferencia acá: sólo se re-cuenta.
+ * adicional, no un loop. Ya no es ciego respecto del ENVÍO (el original ya
+ * respondió), pero esta pantalla sigue sin mostrar teórico/diferencia --
+ * tampoco hace falta para recontar. `products` se recibe del padre (ya los
+ * había cargado para el conteo principal) para no repetir el fetch.
  */
-function RecountStep({ count, onDone }: { count: InventoryCount; onDone: () => void }) {
+function RecountStep({
+  count,
+  products,
+  onDone,
+}: {
+  count: InventoryCount;
+  products: Product[];
+  onDone: () => void;
+}) {
   const { api } = useAuth();
   const flaggedItems = useMemo(() => count.items.filter((i) => i.needsRecount), [count]);
+  const productsById = useMemo(() => new Map(products.map((p) => [p.id, p])), [products]);
   const [values, setValues] = useState<Record<string, InventoryCountDraftItem>>({});
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [flavorProductIds, setFlavorProductIds] = useState<Set<string>>(new Set());
   const idempotencyKeyRef = useRef(newIdempotencyKey());
-
-  // Necesita saber cuáles de los productos marcados son sabores (la fracción
-  // estimada sólo aplica a esos, RN-025) -- `InventoryCountItemResult` no
-  // incluye `flavorId`, así que se resuelve leyendo el catálogo una vez.
-  useEffect(() => {
-    let cancelled = false;
-    void api.get<Product[]>('/api/products').then((products) => {
-      if (cancelled) return;
-      setFlavorProductIds(new Set(products.filter((p) => p.flavorId !== null).map((p) => p.id)));
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [api]);
-
-  function toNumberOrUndefined(raw: string): number | undefined {
-    if (raw.trim() === '') return undefined;
-    const n = Number(raw);
-    return Number.isInteger(n) && n >= 0 ? n : undefined;
-  }
 
   function updateItem(productId: string, patch: Partial<InventoryCountDraftItem>) {
     setValues((current) => {
@@ -336,11 +507,14 @@ function RecountStep({ count, onDone }: { count: InventoryCount; onDone: () => v
 
   async function handleSubmit() {
     setError(null);
-    const submittedItems = Object.values(values).filter(
-      (item) => item.closedUnits !== undefined || item.openUnits !== undefined,
-    );
+    const submittedItems = Object.values(values).filter(isItemCounted);
     if (submittedItems.length !== flaggedItems.length) {
       setError('Recontá todos los productos marcados antes de enviar.');
+      return;
+    }
+    const validationError = findMissingFraction(products, submittedItems);
+    if (validationError) {
+      setError(validationError);
       return;
     }
     setSubmitting(true);
@@ -364,64 +538,21 @@ function RecountStep({ count, onDone }: { count: InventoryCount; onDone: () => v
         Algunos productos tuvieron una diferencia grande y necesitan un segundo conteo.
       </p>
       <ul className="count-list">
-        {flaggedItems.map((flagged) => {
-          const isFlavor = flavorProductIds.has(flagged.productId);
+        {flaggedItems.map((flagged: InventoryCountItemResult) => {
+          const product = productsById.get(flagged.productId);
+          const isFlavor = product ? isFlavorProduct(product) : false;
+          const showsLoose = product ? showsLooseField(product) : true;
           const item = values[flagged.productId];
           return (
             <li className="card count-row" key={flagged.productId}>
               <strong>{flagged.productName}</strong>
-              <div className="count-fields">
-                <label>
-                  Cerrados
-                  <input
-                    type="number"
-                    inputMode="numeric"
-                    min={0}
-                    step={1}
-                    value={item?.closedUnits ?? ''}
-                    onChange={(event) =>
-                      updateItem(flagged.productId, {
-                        closedUnits: toNumberOrUndefined(event.target.value),
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  Sueltos / abiertos
-                  <input
-                    type="number"
-                    inputMode="numeric"
-                    min={0}
-                    step={1}
-                    value={item?.openUnits ?? ''}
-                    onChange={(event) =>
-                      updateItem(flagged.productId, {
-                        openUnits: toNumberOrUndefined(event.target.value),
-                      })
-                    }
-                  />
-                </label>
-                {isFlavor && !!item?.openUnits && item.openUnits > 0 && (
-                  <label>
-                    Fracción estimada
-                    <select
-                      value={item?.openFraction ?? ''}
-                      onChange={(event) =>
-                        updateItem(flagged.productId, {
-                          openFraction: (event.target.value || undefined) as OpenContainerFraction,
-                        })
-                      }
-                    >
-                      <option value="">Elegir...</option>
-                      {OPEN_CONTAINER_FRACTIONS.map((fraction) => (
-                        <option key={fraction} value={fraction}>
-                          {FRACTION_LABELS[fraction]}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-              </div>
+              <QuantityFields
+                isFlavor={isFlavor}
+                showsLoose={showsLoose}
+                unitOfMeasureName={product?.unitOfMeasureName ?? ''}
+                item={item}
+                onChange={(patch) => updateItem(flagged.productId, patch)}
+              />
             </li>
           );
         })}

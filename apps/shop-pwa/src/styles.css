@@ -224,6 +224,30 @@ button:disabled {
   grid-column: span 1;
 }
 
+/* Etapa 6.2.1: secciones por rubro plegables (planilla real agrupada por
+   categoría) -- <details>/<summary> nativo, sin librería de animación. */
+.count-category {
+  margin-bottom: 10px;
+}
+
+.count-category-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: pointer;
+  min-height: 32px;
+  list-style: revert;
+}
+
+.count-category .count-list {
+  margin-top: 12px;
+}
+
+.count-caption {
+  margin: 0;
+}
+
 .mode-fieldset {
   display: flex;
   gap: 16px;
