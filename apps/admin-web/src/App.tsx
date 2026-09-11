@@ -12,6 +12,7 @@ import { InventoryMovementsPage } from './pages/InventoryMovementsPage.js';
 import { ShopOpsPage } from './pages/ShopOpsPage.js';
 import { SalesImportPage } from './pages/SalesImportPage.js';
 import { WeeklyClosingPage } from './pages/WeeklyClosingPage.js';
+import { PriceListPage } from './pages/PriceListPage.js';
 import { Layout } from './components/Layout.js';
 
 /**
@@ -113,6 +114,14 @@ export function App() {
           element={
             <RequireAuth roles={['ADMIN']}>
               <WeeklyClosingPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="precios"
+          element={
+            <RequireAuth roles={['ADMIN']}>
+              <PriceListPage />
             </RequireAuth>
           }
         />
