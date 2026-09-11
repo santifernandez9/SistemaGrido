@@ -7,7 +7,9 @@ import {
   type InventoryCountDraftItem,
   type InventoryCountItemResult,
   type OpenContainerFraction,
+  type PresentationQuantityInput,
   type Product,
+  type ProductCountingPresentation,
 } from '@sistema-grido/shared-types';
 import {
   clearCountDraft,
@@ -34,16 +36,47 @@ function toNumberOrUndefined(raw: string): number | undefined {
   return Number.isInteger(n) && n >= 0 ? n : undefined;
 }
 
-/** Un ítem "cuenta" para el progreso/envío apenas tiene alguna cantidad
+/**
+ * Un ítem "cuenta" para el progreso/envío apenas tiene alguna cantidad
  * cargada -- las 3 líneas del papel real (Salón cerrada/abierta, Depósito)
- * son independientes entre sí (RN, sección 4 del prompt de Etapa 6.2.1). */
-function isItemCounted(item: InventoryCountDraftItem | undefined): boolean {
+ * son independientes entre sí (RN, sección 4 del prompt de Etapa 6.2.1).
+ *
+ * Etapa 6.2.2, secciones 3/14-18 del prompt: para un producto con
+ * presentaciones de conteo configuradas (`hasPresentations`), "Cerrados"
+ * nunca se usa (el backend lo rechaza) -- ahí lo que cuenta es haber
+ * cargado al menos una presentación (`item.presentations` no vacío). Un
+ * campo dejado VACÍO nunca se interpreta como cero -- sólo un "0"
+ * efectivamente tipeado (que `toNumberOrUndefined` conserva como `0`,
+ * distinto de `undefined`) cuenta como "contado explícitamente en cero".
+ */
+function isItemCounted(
+  item: InventoryCountDraftItem | undefined,
+  hasPresentations: boolean,
+): boolean {
   if (!item) return false;
+  if (hasPresentations) {
+    return (item.presentations?.length ?? 0) > 0;
+  }
   return (
     item.closedUnits !== undefined ||
     item.openUnits !== undefined ||
     item.depositoClosedUnits !== undefined
   );
+}
+
+/** Agrupa las presentaciones activas de la organización por producto --
+ * una sola llamada (`GET /api/products/counting-presentations`, Etapa
+ * 6.2.2) en vez de una por producto contra un catálogo de ~200 productos. */
+function groupPresentationsByProduct(
+  presentations: ProductCountingPresentation[],
+): Map<string, ProductCountingPresentation[]> {
+  const byProduct = new Map<string, ProductCountingPresentation[]>();
+  for (const presentation of presentations) {
+    const list = byProduct.get(presentation.productId) ?? [];
+    list.push(presentation);
+    byProduct.set(presentation.productId, list);
+  }
+  return byProduct;
 }
 
 /** Sólo un sabor de helado (`flavorId !== null`) tiene la 3ra línea
@@ -107,6 +140,9 @@ export function CountPage() {
 
   const [phase, setPhase] = useState<Phase>('loading');
   const [products, setProducts] = useState<Product[]>([]);
+  const [presentationsByProduct, setPresentationsByProduct] = useState<
+    Map<string, ProductCountingPresentation[]>
+  >(new Map());
   const [items, setItems] = useState<Record<string, InventoryCountDraftItem>>({});
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -115,8 +151,10 @@ export function CountPage() {
   const idempotencyKeyRef = useRef<string>('');
   const loadedRef = useRef(false);
 
-  // Carga inicial: catálogo + borrador ya guardado (si lo hay) -- restaura la
-  // sesión de conteo tal como quedó, sin perder nada de lo ya tipeado.
+  // Carga inicial: catálogo + presentaciones de conteo activas (Etapa 6.2.2,
+  // en una sola llamada para todo el catálogo) + borrador ya guardado (si lo
+  // hay) -- restaura la sesión de conteo tal como quedó, sin perder nada de
+  // lo ya tipeado.
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -125,12 +163,14 @@ export function CountPage() {
         return;
       }
       try {
-        const [productList, draft] = await Promise.all([
+        const [productList, presentationList, draft] = await Promise.all([
           api.get<Product[]>('/api/products'),
+          api.get<ProductCountingPresentation[]>('/api/products/counting-presentations'),
           loadCountDraft(draftId),
         ]);
         if (cancelled) return;
         setProducts(productList.filter((p) => p.active));
+        setPresentationsByProduct(groupPresentationsByProduct(presentationList));
         if (draft) {
           setItems(draft.items);
           idempotencyKeyRef.current = draft.idempotencyKey;
@@ -183,19 +223,61 @@ export function CountPage() {
     });
   }, []);
 
-  const grouped = useMemo(() => groupByCategory(products), [products]);
-  const countedTotal = useMemo(
-    () => products.filter((p) => isItemCounted(items[p.id])).length,
-    [products, items],
+  const hasPresentations = useCallback(
+    (productId: string) => (presentationsByProduct.get(productId)?.length ?? 0) > 0,
+    [presentationsByProduct],
   );
+
+  const grouped = useMemo(() => groupByCategory(products), [products]);
+  // Etapa 6.2.2, secciones 3/4 del prompt (BLOCKER): el universo obligatorio
+  // del conteo es EXACTAMENTE el catálogo activo cargado más arriba (mismo
+  // criterio que `submitInventoryCount` en el backend, que valida esto de
+  // forma AUTORITATIVA -- esto acá es sólo para guiar a la empleada antes de
+  // intentar enviar, nunca la validación real).
+  const missingProducts = useMemo(
+    () => products.filter((p) => !isItemCounted(items[p.id], hasPresentations(p.id))),
+    [products, items, hasPresentations],
+  );
+  const countedTotal = products.length - missingProducts.length;
+  const categoriesWithMissing = useMemo(() => {
+    const missingIds = new Set(missingProducts.map((p) => p.id));
+    return grouped
+      .map((group) => ({
+        category: group.category,
+        missing: group.products.filter((p) => missingIds.has(p.id)).length,
+      }))
+      .filter((g) => g.missing > 0);
+  }, [grouped, missingProducts]);
+
+  const categoryRefs = useRef<Map<string, HTMLDetailsElement>>(new Map());
+  const registerCategoryRef = useCallback((category: string, el: HTMLDetailsElement | null) => {
+    if (el) categoryRefs.current.set(category, el);
+    else categoryRefs.current.delete(category);
+  }, []);
+  function jumpToCategory(category: string) {
+    const el = categoryRefs.current.get(category);
+    if (!el) return;
+    el.open = true;
+    // `scrollIntoView` no existe en jsdom (entorno de test) -- se llama de
+    // forma defensiva, nunca es esencial para el comportamiento real.
+    el.scrollIntoView?.({ behavior: 'smooth', block: 'start' });
+  }
 
   async function handleSubmit() {
     setError(null);
-    const submittedItems = Object.values(items).filter(isItemCounted);
-    if (submittedItems.length === 0) {
-      setError('Contá al menos un producto antes de enviar.');
+    // Mismo chequeo que el backend hace de forma AUTORITATIVA
+    // (`submitInventoryCount`): nunca se envía si falta contar algún
+    // producto activo del catálogo -- acá sólo se anticipa para no gastar un
+    // viaje al servidor, el botón ya queda deshabilitado mientras falte algo.
+    if (missingProducts.length > 0) {
+      setError(
+        `Faltan ${missingProducts.length} producto(s) por contar antes de poder enviar el conteo.`,
+      );
       return;
     }
+    const submittedItems = Object.values(items).filter((item) =>
+      isItemCounted(item, hasPresentations(item.productId)),
+    );
     const validationError = findMissingFraction(products, submittedItems);
     if (validationError) {
       setError(validationError);
@@ -240,7 +322,14 @@ export function CountPage() {
   }
 
   if (phase === 'recounting' && result) {
-    return <RecountStep count={result} products={products} onDone={() => setPhase('done')} />;
+    return (
+      <RecountStep
+        count={result}
+        products={products}
+        presentationsByProduct={presentationsByProduct}
+        onDone={() => setPhase('done')}
+      />
+    );
   }
 
   if (phase === 'done') {
@@ -261,19 +350,39 @@ export function CountPage() {
         automáticamente en este dispositivo, aunque se corte la conexión o cierres la app.
       </p>
 
+      <p className="muted count-progress" aria-live="polite">
+        {countedTotal} de {products.length} productos contados.
+      </p>
+
+      {categoriesWithMissing.length > 0 && (
+        <div className="card count-missing-summary" role="status">
+          <strong>
+            Faltan {missingProducts.length} producto{missingProducts.length === 1 ? '' : 's'} por
+            contar:
+          </strong>
+          <ul className="count-missing-list">
+            {categoriesWithMissing.map((g) => (
+              <li key={g.category}>
+                <button type="button" onClick={() => jumpToCategory(g.category)}>
+                  {g.category} ({g.missing})
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {grouped.map((group) => (
         <CategorySection
           key={group.category}
           category={group.category}
           products={group.products}
           items={items}
+          presentationsByProduct={presentationsByProduct}
           onChangeItem={updateItem}
+          detailsRef={(el) => registerCategoryRef(group.category, el)}
         />
       ))}
-
-      <p className="muted">
-        {countedTotal} de {products.length} productos contados en total.
-      </p>
 
       {error && (
         <p className="error" role="alert">
@@ -282,7 +391,16 @@ export function CountPage() {
       )}
 
       <div className="submit-bar">
-        <button type="button" onClick={() => void handleSubmit()} disabled={submitting}>
+        <button
+          type="button"
+          onClick={() => void handleSubmit()}
+          disabled={submitting || missingProducts.length > 0}
+          title={
+            missingProducts.length > 0
+              ? `Faltan ${missingProducts.length} producto(s) por contar`
+              : undefined
+          }
+        >
           {submitting ? 'Enviando...' : 'Enviar conteo'}
         </button>
       </div>
@@ -314,17 +432,23 @@ function CategorySection({
   category,
   products,
   items,
+  presentationsByProduct,
   onChangeItem,
+  detailsRef,
 }: {
   category: string;
   products: Product[];
   items: Record<string, InventoryCountDraftItem>;
+  presentationsByProduct: Map<string, ProductCountingPresentation[]>;
   onChangeItem: (productId: string, patch: Partial<InventoryCountDraftItem>) => void;
+  detailsRef?: (el: HTMLDetailsElement | null) => void;
 }) {
-  const counted = products.filter((p) => isItemCounted(items[p.id])).length;
+  const counted = products.filter((p) =>
+    isItemCounted(items[p.id], (presentationsByProduct.get(p.id)?.length ?? 0) > 0),
+  ).length;
 
   return (
-    <details className="card count-category">
+    <details className="card count-category" ref={detailsRef}>
       <summary className="count-category-summary">
         <strong>{category}</strong>
         <span className="muted">
@@ -337,6 +461,7 @@ function CategorySection({
             key={product.id}
             product={product}
             item={items[product.id]}
+            presentations={presentationsByProduct.get(product.id) ?? []}
             onChange={(patch) => onChangeItem(product.id, patch)}
           />
         ))}
@@ -348,10 +473,12 @@ function CategorySection({
 function CountRow({
   product,
   item,
+  presentations,
   onChange,
 }: {
   product: Product;
   item: InventoryCountDraftItem | undefined;
+  presentations: ProductCountingPresentation[];
   onChange: (patch: Partial<InventoryCountDraftItem>) => void;
 }) {
   return (
@@ -361,6 +488,7 @@ function CountRow({
         isFlavor={isFlavorProduct(product)}
         showsLoose={showsLooseField(product)}
         unitOfMeasureName={product.unitOfMeasureName}
+        presentations={presentations}
         item={item}
         onChange={onChange}
       />
@@ -369,27 +497,42 @@ function CountRow({
 }
 
 /**
- * Los 3 campos posibles de una línea de conteo (sección 1/2 del prompt de
+ * Los campos posibles de una línea de conteo (sección 1/2 del prompt de
  * Etapa 6.2.1, mismos que la planilla de papel real): "Cerrados"/"Salón -
  * cerrada" siempre; "Sueltos"/"Salón - abierta" sólo cuando corresponde
  * (`showsLoose`); la fracción estimada sólo para un sabor con abiertos > 0;
  * y "Depósito" sólo para un sabor (3ra línea, exclusiva de sabores).
  * Compartido entre el conteo principal y el reconteo para no duplicar esta
  * lógica en dos lugares.
+ *
+ * Etapa 6.2.2, secciones 14-18 del prompt: cuando el producto tiene
+ * presentaciones de conteo activas configuradas (`presentations` no vacío,
+ * ej. Unidad/Caja/Pack -- nunca hardcodeado, se renderiza lo que el backend
+ * devuelva), reemplazan por completo al campo "Cerrados" -- son mutuamente
+ * excluyentes, igual que exige el backend (`computeItem`). Nunca se
+ * multiplica nada acá: cada input pide la cantidad FÍSICA de esa
+ * presentación tal cual está escrita en el papel (ej. "2 cajas"), y el
+ * backend es quien la convierte a la cantidad canónica al recibirla.
  */
 function QuantityFields({
   isFlavor,
   showsLoose,
   unitOfMeasureName,
+  presentations,
   item,
   onChange,
 }: {
   isFlavor: boolean;
   showsLoose: boolean;
   unitOfMeasureName: string;
+  presentations: ProductCountingPresentation[];
   item: InventoryCountDraftItem | undefined;
   onChange: (patch: Partial<InventoryCountDraftItem>) => void;
 }) {
+  if (presentations.length > 0) {
+    return <PresentationFields presentations={presentations} item={item} onChange={onChange} />;
+  }
+
   const openUnits = item?.openUnits ?? undefined;
   const closedLabel = isFlavor
     ? `Salón - cerrada (${unitOfMeasureName})`
@@ -475,6 +618,66 @@ function QuantityFields({
   );
 }
 
+/** Cambia (o quita, si se vacía) la cantidad de UNA presentación dentro de
+ * `item.presentations` -- las demás presentaciones del mismo producto no se
+ * tocan, así que se puede cargar sólo "2 cajas" sin tener que completar
+ * también Pack/Unidad si no aplican a ese conteo. */
+function updatePresentationQuantity(
+  current: PresentationQuantityInput[] | undefined,
+  presentationId: string,
+  raw: string,
+): PresentationQuantityInput[] {
+  const quantity = toNumberOrUndefined(raw);
+  const withoutThis = (current ?? []).filter((p) => p.presentationId !== presentationId);
+  return quantity === undefined ? withoutThis : [...withoutThis, { presentationId, quantity }];
+}
+
+/**
+ * Campos dinámicos por presentación (Etapa 6.2.2, secciones 14/15/18 del
+ * prompt): un `<input>` por cada `ProductCountingPresentation` ACTIVA del
+ * producto, rotulado con `unitOfMeasureName` tal cual viene del backend --
+ * nunca "Unidad/Caja/Pack" hardcodeado acá. Agregar una presentación nueva
+ * desde el admin (o cualquier nombre de unidad de manejo) aparece sola en
+ * esta pantalla sin tocar código, igual que la agrupación por categoría de
+ * Etapa 6.2.1.
+ */
+function PresentationFields({
+  presentations,
+  item,
+  onChange,
+}: {
+  presentations: ProductCountingPresentation[];
+  item: InventoryCountDraftItem | undefined;
+  onChange: (patch: Partial<InventoryCountDraftItem>) => void;
+}) {
+  const byId = new Map((item?.presentations ?? []).map((p) => [p.presentationId, p.quantity]));
+  return (
+    <div className="count-fields">
+      {presentations.map((presentation) => (
+        <label key={presentation.id}>
+          {presentation.unitOfMeasureName}
+          <input
+            type="number"
+            inputMode="numeric"
+            min={0}
+            step={1}
+            value={byId.get(presentation.id) ?? ''}
+            onChange={(event) =>
+              onChange({
+                presentations: updatePresentationQuantity(
+                  item?.presentations,
+                  presentation.id,
+                  event.target.value,
+                ),
+              })
+            }
+          />
+        </label>
+      ))}
+    </div>
+  );
+}
+
 /**
  * Reconteo (sección 5 del prompt): sólo los productos marcados
  * `needsRecount` en la respuesta del envío original -- un único reenvío
@@ -486,10 +689,12 @@ function QuantityFields({
 function RecountStep({
   count,
   products,
+  presentationsByProduct,
   onDone,
 }: {
   count: InventoryCount;
   products: Product[];
+  presentationsByProduct: Map<string, ProductCountingPresentation[]>;
   onDone: () => void;
 }) {
   const { api } = useAuth();
@@ -509,7 +714,9 @@ function RecountStep({
 
   async function handleSubmit() {
     setError(null);
-    const submittedItems = Object.values(values).filter(isItemCounted);
+    const submittedItems = Object.values(values).filter((item) =>
+      isItemCounted(item, (presentationsByProduct.get(item.productId)?.length ?? 0) > 0),
+    );
     if (submittedItems.length !== flaggedItems.length) {
       setError('Recontá todos los productos marcados antes de enviar.');
       return;
@@ -552,6 +759,7 @@ function RecountStep({
                 isFlavor={isFlavor}
                 showsLoose={showsLoose}
                 unitOfMeasureName={product?.unitOfMeasureName ?? ''}
+                presentations={presentationsByProduct.get(flagged.productId) ?? []}
                 item={item}
                 onChange={(patch) => updateItem(flagged.productId, patch)}
               />

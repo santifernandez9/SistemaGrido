@@ -9,3 +9,4 @@ export * from './shop-ops.js';
 export * from './sales-import.js';
 export * from './weekly-closing.js';
 export * from './price-list.js';
+export * from './product-counting-presentation.js';

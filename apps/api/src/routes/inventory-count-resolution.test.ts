@@ -33,24 +33,45 @@ describe('resolución de diferencias y detección de tipeo (Etapa 6.2)', () => {
     });
   }
 
-  async function setSalePrice(productId: string, label: string, value: string) {
-    const reference = await prisma.priceReference.create({
-      data: { organizationId, priceType: 'SALE_PRICE', label },
+  /**
+   * Crea/actualiza el precio de venta vigente de un producto. Los sucesivos
+   * `PriceValue` de una MISMA referencia se resuelven por
+   * `effectiveFrom` (ver `resolveEffectivePricesForProducts`), así que para
+   * simular un CAMBIO de precio en el tiempo (tests [P]-[S]) hay que
+   * reutilizar la MISMA `PriceReference`/mapeo del producto y agregar un
+   * `PriceValue` nuevo -- el mapeo producto->referencia es único por
+   * `(organizationId, productId, priceType)`, así que una segunda
+   * referencia para el mismo producto violaría esa unicidad.
+   */
+  async function setSalePrice(
+    productId: string,
+    label: string,
+    value: string,
+    effectiveFromIso: string = '2020-01-01',
+  ) {
+    const effectiveFrom = new Date(`${effectiveFromIso}T00:00:00.000Z`);
+    const existingMapping = await prisma.priceReferenceProductMapping.findFirst({
+      where: { organizationId, productId, priceType: 'SALE_PRICE' },
     });
+    const reference = existingMapping
+      ? { id: existingMapping.priceReferenceId }
+      : await prisma.priceReference.create({
+          data: { organizationId, priceType: 'SALE_PRICE', label },
+        });
     const importRow = await prisma.priceListImport.create({
       data: {
         organizationId,
         source: 'HELACOR_SALE_PRICE_LIST',
         priceType: 'SALE_PRICE',
         originalFilename: 'x.xlsx',
-        fileHash: `hash-${label}-${Math.random()}`,
+        fileHash: `hash-${label}-${effectiveFromIso}-${Math.random()}`,
         status: 'CONFIRMED',
         totalRows: 1,
         validRows: 1,
         createdById: adminId,
         confirmedById: adminId,
         confirmedAt: new Date(),
-        effectiveFrom: new Date('2020-01-01'),
+        effectiveFrom,
         rows: {
           create: [{ rowNumber: 1, rawLabel: label, rawValueWithTax: value, status: 'VALID' }],
         },
@@ -63,21 +84,23 @@ describe('resolución de diferencias y detección de tipeo (Etapa 6.2)', () => {
         priceReferenceId: reference.id,
         priceType: 'SALE_PRICE',
         value,
-        effectiveFrom: new Date('2020-01-01'),
+        effectiveFrom,
         priceListImportId: importRow.id,
         priceListImportRowId: importRow.rows[0]!.id,
         createdById: adminId,
       },
     });
-    await prisma.priceReferenceProductMapping.create({
-      data: {
-        organizationId,
-        priceReferenceId: reference.id,
-        priceType: 'SALE_PRICE',
-        productId,
-        confirmedById: adminId,
-      },
-    });
+    if (!existingMapping) {
+      await prisma.priceReferenceProductMapping.create({
+        data: {
+          organizationId,
+          priceReferenceId: reference.id,
+          priceType: 'SALE_PRICE',
+          productId,
+          confirmedById: adminId,
+        },
+      });
+    }
   }
 
   beforeEach(async () => {
@@ -155,6 +178,24 @@ describe('resolución de diferencias y detección de tipeo (Etapa 6.2)', () => {
         items,
         idempotencyKey: 'conteo-1',
       },
+    });
+  }
+
+  /**
+   * Igual que `submitCount`, pero permitiendo elegir `weekStart` -- usado por
+   * los tests de precio histórico (sección 13 del prompt de Etapa 6.2.2) para
+   * probar semanas distintas a la fija de arriba.
+   */
+  async function submitCountForWeek(
+    items: Array<{ productId: string; closedUnits: number }>,
+    weekStart: string,
+    idempotencyKey: string,
+  ) {
+    return app.inject({
+      method: 'POST',
+      url: '/api/shop/counts',
+      headers: adminAuthHeader,
+      payload: { locationId: locationShop, weekStart, items, idempotencyKey },
     });
   }
 
@@ -359,5 +400,139 @@ describe('resolución de diferencias y detección de tipeo (Etapa 6.2)', () => {
     expect(candidates).toHaveLength(2);
     const surplusIds = candidates.map((c) => c.surplusProductId).sort();
     expect(surplusIds).toEqual([productAlmendrado, productCrocantino].sort());
+  });
+
+  // --- Precio histórico de la semana del conteo (sección 13, Etapa 6.2.2) --
+  //
+  // Ejemplo del prompt: en la semana de septiembre Casatta y Almendrado
+  // valen ambos $10.500; en octubre cambian a $11.000/$12.000. Analizar el
+  // conteo de septiembre tiene que seguir detectando el candidato con los
+  // precios DE SEPTIEMBRE, nunca con el precio vigente "hoy" ni con el
+  // vigente al momento en que se corre el test. Para que el test discrimine
+  // de verdad entre "hoy" (fecha real del sistema) y "la semana del
+  // conteo", la semana contada y el precio nuevo quedan ambos en el pasado
+  // respecto de la fecha real de ejecución -- así, un bug que usara
+  // `new Date()` en lugar de `weekEndDate(weekStart)` resolvería el precio
+  // NUEVO (distinto) y el candidato dejaría de detectarse.
+
+  it('[P] la detección de tipeo usa el precio de venta VIGENTE PARA LA SEMANA DEL CONTEO, no el de hoy', async () => {
+    // Único precio vigente, muy anterior a la semana contada -- si el
+    // detector usara `new Date()` en vez de la fecha del conteo, seguiría
+    // encontrando este mismo precio (es el único que existe), así que este
+    // test por sí solo no discrimina el bug -- ver [Q] para el caso que sí
+    // lo discrimina. Sirve para fijar el comportamiento básico esperado.
+    await setSalePrice(productCasatta, 'CASATTA x 8 Porciones', '10500.00', '2026-05-01');
+    await setSalePrice(productAlmendrado, 'ALMENDRADO x 8 Porciones', '10500.00', '2026-05-01');
+
+    const res = await submitCountForWeek(
+      [
+        { productId: productCasatta, closedUnits: 8 }, // -2 faltante
+        { productId: productAlmendrado, closedUnits: 12 }, // +2 sobrante
+        { productId: productCrocantino, closedUnits: 10 },
+      ],
+      '2026-06-01',
+      'conteo-historico-p',
+    );
+    expect(res.statusCode).toBe(201);
+    const candidates = res.json().data.typoCandidates as Array<{ salePriceUsed: string }>;
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]!.salePriceUsed).toBe('10500.00');
+  });
+
+  it('[Q] un cambio de precio POSTERIOR a la semana del conteo no altera la detección histórica', async () => {
+    // Precio vigente DURANTE la semana contada (junio): mismo precio para
+    // ambos productos -> compensación exacta esperable.
+    await setSalePrice(productCasatta, 'CASATTA x 8 Porciones', '10500.00', '2026-05-01');
+    await setSalePrice(productAlmendrado, 'ALMENDRADO x 8 Porciones', '10500.00', '2026-05-01');
+    // Precio NUEVO, vigente DESPUÉS de la semana contada pero ANTES de la
+    // fecha real de hoy (2026-09-11) -- distinto entre los dos productos.
+    // Si el detector usara `new Date()` en vez de la fecha del conteo,
+    // resolvería ESTE precio (distinto) y el candidato NO se detectaría.
+    await setSalePrice(productCasatta, 'CASATTA x 8 Porciones (nuevo)', '11000.00', '2026-07-01');
+    await setSalePrice(
+      productAlmendrado,
+      'ALMENDRADO x 8 Porciones (nuevo)',
+      '12000.00',
+      '2026-07-01',
+    );
+
+    const res = await submitCountForWeek(
+      [
+        { productId: productCasatta, closedUnits: 8 }, // -2 faltante
+        { productId: productAlmendrado, closedUnits: 12 }, // +2 sobrante
+        { productId: productCrocantino, closedUnits: 10 },
+      ],
+      '2026-06-01', // semana ANTERIOR al cambio de precio de julio
+      'conteo-historico-q',
+    );
+    expect(res.statusCode).toBe(201);
+    const candidates = res.json().data.typoCandidates as Array<{
+      surplusProductId: string;
+      salePriceUsed: string;
+    }>;
+    // Se detecta usando el precio DE LA SEMANA CONTADA ($10.500), no el
+    // precio nuevo ($11.000/$12.000) vigente hoy.
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]!.surplusProductId).toBe(productAlmendrado);
+    expect(candidates[0]!.salePriceUsed).toBe('10500.00');
+
+    // Confirma además que el candidato ya persistido no se recalcula
+    // retroactivamente al consultar el conteo más tarde -- sigue reflejando
+    // la detección histórica original.
+    const countId = res.json().data.id;
+    const later = await app.inject({
+      method: 'GET',
+      url: `/api/shop/counts/${countId}`,
+      headers: adminAuthHeader,
+    });
+    const laterCandidates = later.json().data.typoCandidates as Array<{ salePriceUsed: string }>;
+    expect(laterCandidates).toHaveLength(1);
+    expect(laterCandidates[0]!.salePriceUsed).toBe('10500.00');
+  });
+
+  it('[R] mismo precio histórico + cantidades compensatorias en la semana del conteo -> candidato', async () => {
+    // Precio vigente desde ANTES de la semana contada -- sin ningún cambio
+    // posterior en juego (eso ya lo cubre [Q]); acá sólo importa que el
+    // precio histórico correcto se use y que la compensación se detecte.
+    await setSalePrice(productCasatta, 'CASATTA x 8 Porciones', '10500.00', '2026-05-01');
+    await setSalePrice(productAlmendrado, 'ALMENDRADO x 8 Porciones', '10500.00', '2026-05-01');
+
+    const res = await submitCountForWeek(
+      [
+        { productId: productCasatta, closedUnits: 8 }, // -2 faltante
+        { productId: productAlmendrado, closedUnits: 12 }, // +2 sobrante
+        { productId: productCrocantino, closedUnits: 10 },
+      ],
+      '2026-06-01',
+      'conteo-historico-r',
+    );
+    expect(res.statusCode).toBe(201);
+    const candidates = res.json().data.typoCandidates as Array<{
+      compensatingQuantity: string;
+      salePriceUsed: string;
+    }>;
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]!.compensatingQuantity).toBe('2.000');
+    expect(candidates[0]!.salePriceUsed).toBe('10500.00');
+  });
+
+  it('[S] precios históricos DISTINTOS entre sí en la semana del conteo -> ningún candidato', async () => {
+    // Vigentes durante la semana contada (junio), pero DISTINTOS entre los
+    // dos productos -- no debe sugerirse nada aunque las cantidades
+    // compensen exacto.
+    await setSalePrice(productCasatta, 'CASATTA x 8 Porciones', '10500.00', '2026-05-01');
+    await setSalePrice(productAlmendrado, 'ALMENDRADO x 8 Porciones', '9000.00', '2026-05-01');
+
+    const res = await submitCountForWeek(
+      [
+        { productId: productCasatta, closedUnits: 8 }, // -2
+        { productId: productAlmendrado, closedUnits: 12 }, // +2, compensa en cantidad
+        { productId: productCrocantino, closedUnits: 10 },
+      ],
+      '2026-06-01',
+      'conteo-historico-s',
+    );
+    expect(res.statusCode).toBe(201);
+    expect(res.json().data.typoCandidates).toHaveLength(0);
   });
 });

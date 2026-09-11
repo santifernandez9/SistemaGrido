@@ -12,6 +12,7 @@ import type {
   WeeklyClosingFilters,
   WeeklyClosingItem,
   WeeklyClosingMissingCostProduct,
+  WeeklyClosingPendingDifferenceResolution,
 } from '@sistema-grido/shared-types';
 import type { CurrentUser } from '../plugins/auth.js';
 import { ConflictError, InternalError, NotFoundError, ValidationError } from '../errors.js';
@@ -178,6 +179,63 @@ async function computeMissingCostProducts(
 }
 
 /**
+ * Etapa 6.2.2, secciones 7/8/9/10/12 del prompt (BLOCKER, CONFIRMADO):
+ * corrige que el cierre pudiera quedar habilitado con diferencias de stock
+ * sin resolución explícita, y que `closeWeeklyClosing` pudiera generar un
+ * `COUNT_CORRECTION` sobre una diferencia todavía no confirmada/resuelta.
+ * Toda diferencia distinta de cero del conteo gobernante necesita una
+ * resolución EXPLÍCITA y del tipo correcto según su signo (mismos dos
+ * `DifferenceResolutionKind` de Etapa 6.2, sin inventar ninguno nuevo):
+ * un FALTANTE (`difference < 0`) necesita `SHORTAGE_CONFIRMED`; un SOBRANTE
+ * (`difference > 0`) necesita `SURPLUS_RESOLVED`. Una diferencia = 0 nunca
+ * requiere resolución (nada que reconciliar). Recibe el cliente de Prisma
+ * como parámetro (mismo patrón que `computeMissingCostProducts`) para
+ * poder usarse tanto fuera de una transacción (chequeo informativo del
+ * checklist) como DENTRO de una (chequeo AUTORITATIVO de
+ * `closeWeeklyClosing`).
+ *
+ * Sección 9 del prompt: candidatos de posible error de tipeo (Etapa 6.2)
+ * son sólo una SUGERENCIA -- confirmarlos/rechazarlos NO es un requisito
+ * para que una diferencia cuente como resuelta; lo único que importa acá es
+ * `InventoryCountItem.differenceResolution`, exactamente el mismo gesto
+ * explícito de `resolveInventoryDifference` que ya exigía Etapa 6.2 para
+ * considerar una diferencia atendida (nunca dos conceptos de "resuelto"
+ * compitiendo entre sí).
+ */
+async function computePendingDifferenceResolutions(
+  db: Prisma.TransactionClient,
+  organizationId: string,
+  governingCountId: string | null,
+): Promise<WeeklyClosingPendingDifferenceResolution[]> {
+  if (!governingCountId) return [];
+  const items = await db.inventoryCountItem.findMany({
+    where: { organizationId, countId: governingCountId },
+    include: { product: { select: { name: true } } },
+  });
+
+  const pending: WeeklyClosingPendingDifferenceResolution[] = [];
+  for (const item of items) {
+    if (item.difference === null || item.difference.isZero()) continue;
+    if (item.difference.isNegative() && item.differenceResolution !== 'SHORTAGE_CONFIRMED') {
+      pending.push({
+        productId: item.productId,
+        productName: item.product.name,
+        difference: item.difference.toFixed(3),
+        reason: 'SHORTAGE_NOT_CONFIRMED',
+      });
+    } else if (item.difference.isPositive() && item.differenceResolution !== 'SURPLUS_RESOLVED') {
+      pending.push({
+        productId: item.productId,
+        productName: item.product.name,
+        difference: item.difference.toFixed(3),
+        reason: 'SURPLUS_NOT_RESOLVED',
+      });
+    }
+  }
+  return pending;
+}
+
+/**
  * Checklist previo al cierre (sección 5 del prompt). `countSubmitted` es la
  * única sub-condición auto-verificada e inequívoca; mermas/gastos/ventas
  * son sólo informativos (nunca bloquean por sí solos, sección 5: "no
@@ -257,6 +315,18 @@ async function computeChecklist(
     closing.status === 'CLOSED'
       ? []
       : await computeMissingCostProducts(fastify.db, organizationId, liveItems, closing.periodEnd);
+  // Etapa 6.2.2, secciones 7/8/10 del prompt: mismo criterio que
+  // `missingCostProducts` -- sólo tiene sentido calcularlo contra una vista
+  // previa (OPEN/REOPENED); una revisión CLOSED ya pasó este chequeo para
+  // poder cerrarse, y sus diferencias/resoluciones ya son historia.
+  const pendingDifferenceResolutions =
+    closing.status === 'CLOSED'
+      ? []
+      : await computePendingDifferenceResolutions(
+          fastify.db,
+          organizationId,
+          governing.count?.id ?? null,
+        );
 
   return {
     countSubmitted,
@@ -271,11 +341,13 @@ async function computeChecklist(
     reviewConfirmedByName: closing.reviewConfirmedBy?.displayName ?? null,
     reviewConfirmedAt: closing.reviewConfirmedAt?.toISOString() ?? null,
     missingCostProducts,
+    pendingDifferenceResolutions,
     canClose:
       closing.status !== 'CLOSED' &&
       countSubmitted &&
       reviewConfirmed &&
-      missingCostProducts.length === 0,
+      missingCostProducts.length === 0 &&
+      pendingDifferenceResolutions.length === 0,
   };
 }
 
@@ -525,6 +597,16 @@ async function resolveCloseConflictAfterRace(
  * donde la revisión podía quedar confirmada sin su auditoría (si el
  * proceso caía entre ambas líneas) o viceversa. Ninguna operación
  * sensible puede tener éxito sin su auditoría correspondiente.
+ *
+ * Etapa 6.2.2, sección 11 del prompt: primera línea de defensa contra
+ * confirmar la revisión con diferencias todavía pendientes de resolución
+ * -- preferencia explícita del prompt ("UI/review detecta antes"). NO es la
+ * protección autoritativa final (esa sigue siendo el chequeo DENTRO de la
+ * transacción de `closeWeeklyClosing`, sección 12): esta función no
+ * necesita repetir el chequeo dentro de su propia transacción porque acá
+ * sólo se actualiza `reviewConfirmedById`/`At`, nunca se genera ningún
+ * `COUNT_CORRECTION`/snapshot -- el efecto irreversible real ocurre
+ * únicamente en `close`.
  */
 export async function confirmWeeklyClosingReview(
   fastify: FastifyInstance,
@@ -535,6 +617,19 @@ export async function confirmWeeklyClosingReview(
   const closing = await loadClosingOrThrow(fastify, organizationId, id);
   if (closing.status === 'CLOSED') {
     throw new ConflictError('No se puede confirmar la revisión de un cierre que ya está cerrado.');
+  }
+
+  const governing = await loadGoverningCount(fastify, organizationId, closing);
+  const pendingDifferenceResolutions = await computePendingDifferenceResolutions(
+    fastify.db,
+    organizationId,
+    governing.count?.id ?? null,
+  );
+  if (pendingDifferenceResolutions.length > 0) {
+    const names = pendingDifferenceResolutions.map((p) => p.productName).join(', ');
+    throw new ConflictError(
+      `No se puede confirmar la revisión: hay ${pendingDifferenceResolutions.length} diferencia(s) pendientes de resolución (${names}).`,
+    );
   }
 
   await fastify.db.$transaction(async (tx) => {
@@ -668,6 +763,12 @@ export async function closeWeeklyClosing(
         `falta el costo vigente (C/IVA) de ${checklist.missingCostProducts.length} producto(s) con stock real: ${names}`,
       );
     }
+    if (checklist.pendingDifferenceResolutions.length > 0) {
+      const names = checklist.pendingDifferenceResolutions.map((p) => p.productName).join(', ');
+      reasons.push(
+        `hay ${checklist.pendingDifferenceResolutions.length} diferencia(s) pendientes de resolución: ${names}`,
+      );
+    }
     throw new ConflictError(`No se puede cerrar esta semana: ${reasons.join('; ')}.`);
   }
 
@@ -761,6 +862,30 @@ export async function closeWeeklyClosing(
         'COST_WITH_TAX',
         asOfDate,
       );
+
+      // Etapa 6.2.2, secciones 7/8/9/10/12 del prompt (BLOCKER, CONFIRMADO):
+      // chequeo AUTORITATIVO -- el de `checklist.pendingDifferenceResolutions`
+      // de arriba es sólo un adelanto informativo fuera de la transacción
+      // (y, antes de eso, `confirmWeeklyClosingReview` ya intentó bloquear
+      // la revisión con diferencias pendientes -- pero esa NO es la
+      // protección real, sección 11: "no confiar en una sola validación
+      // previa"). Se vuelve a resolver acá, DENTRO de la misma transacción
+      // que decide el cierre, contra `tx`, para que sea consistente incluso
+      // si una diferencia quedó sin resolver por cualquier otro camino. Si
+      // aparece alguna, todo el cierre falla (ROLLBACK completo) ANTES de
+      // tocar `InventorySnapshotItem`/`COUNT_CORRECTION` -- nunca se genera
+      // un ajuste sobre una diferencia no resuelta (sección 9 del prompt).
+      const pendingDifferenceResolutions = await computePendingDifferenceResolutions(
+        tx,
+        organizationId,
+        governing.count?.id ?? null,
+      );
+      if (pendingDifferenceResolutions.length > 0) {
+        const names = pendingDifferenceResolutions.map((p) => p.productName).join(', ');
+        throw new ConflictError(
+          `No se puede cerrar esta semana: hay ${pendingDifferenceResolutions.length} diferencia(s) pendientes de resolución: ${names}.`,
+        );
+      }
 
       // Trazabilidad persistida (sección 7 del prompt Etapa 6.1): un mismo
       // `WeeklyClosing` (id constante a través de sus revisiones) sólo

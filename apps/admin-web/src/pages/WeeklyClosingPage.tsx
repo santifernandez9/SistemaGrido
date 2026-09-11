@@ -347,6 +347,18 @@ const MISSING_COST_REASON_LABELS: Record<
   NO_VIGENT_VALUE: 'mapeado pero sin costo vigente',
 };
 
+/** Etapa 6.2.2, secciones 7-11 del prompt (BLOCKER): ninguna diferencia
+ * != 0 del conteo gobernante puede quedar sin resolución explícita antes
+ * de cerrar -- ver `computePendingDifferenceResolutions` en
+ * `weekly-closing.ts`. */
+const PENDING_DIFFERENCE_REASON_LABELS: Record<
+  WeeklyClosingDetail['checklist']['pendingDifferenceResolutions'][number]['reason'],
+  string
+> = {
+  SHORTAGE_NOT_CONFIRMED: 'faltante sin confirmar',
+  SURPLUS_NOT_RESOLVED: 'sobrante sin resolver',
+};
+
 const DIFFERENCE_RESOLUTION_LABELS: Record<DifferenceResolutionKind, string> = {
   SHORTAGE_CONFIRMED: 'Faltante confirmado',
   SURPLUS_RESOLVED: 'Sobrante revisado',
@@ -365,6 +377,11 @@ function missingReasons(checklist: WeeklyClosingDetail['checklist']): string[] {
   if (!checklist.reviewConfirmedById) reasons.push('la confirmación de revisión del checklist');
   if (checklist.missingCostProducts.length > 0) {
     reasons.push('cargar el costo de los productos listados en "Costos faltantes"');
+  }
+  if (checklist.pendingDifferenceResolutions.length > 0) {
+    reasons.push(
+      `resolver ${checklist.pendingDifferenceResolutions.length} diferencia(s) pendiente(s) (ver "Diferencias pendientes de resolver")`,
+    );
   }
   return reasons;
 }
@@ -624,6 +641,28 @@ function WeeklyClosingDetailPanel({
                 </li>
               ))}
             </ul>
+          )}
+        </dd>
+        <dt>Diferencias pendientes de resolver</dt>
+        <dd>
+          {checklist.pendingDifferenceResolutions.length === 0 ? (
+            'Ninguna'
+          ) : (
+            <>
+              <p className="negative-quantity">
+                Hay {checklist.pendingDifferenceResolutions.length} diferencia
+                {checklist.pendingDifferenceResolutions.length === 1 ? '' : 's'} pendiente
+                {checklist.pendingDifferenceResolutions.length === 1 ? '' : 's'} de resolver -- no
+                se puede cerrar la semana hasta resolverlas (ver "Teórico vs real" más abajo).
+              </p>
+              <ul>
+                {checklist.pendingDifferenceResolutions.map((p) => (
+                  <li key={p.productId} className="negative-quantity">
+                    {p.productName} ({p.difference}): {PENDING_DIFFERENCE_REASON_LABELS[p.reason]}
+                  </li>
+                ))}
+              </ul>
+            </>
           )}
         </dd>
       </dl>

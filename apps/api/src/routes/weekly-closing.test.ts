@@ -295,13 +295,50 @@ describe('/api/weekly-closings', () => {
     });
   }
 
+  /**
+   * Etapa 6.2.2, secciones 7/8/10 del prompt (BLOCKER, CONFIRMADO): ninguna
+   * diferencia distinta de cero puede quedar sin resolución explícita antes
+   * de cerrar -- un FALTANTE necesita `SHORTAGE_CONFIRMED`, un SOBRANTE
+   * necesita `SURPLUS_RESOLVED` (mismos dos `DifferenceResolutionKind` de
+   * Etapa 6.2, nunca inventados de nuevo). Resuelve TODAS las diferencias
+   * pendientes del conteo gobernante, releyendo su estado FINAL (después de
+   * cualquier reconteo) para no resolver contra valores desactualizados.
+   */
+  async function resolveAllDifferences(countId: string) {
+    const detail = await app.inject({
+      method: 'GET',
+      url: `/api/shop/counts/${countId}`,
+      headers: adminAuthHeader,
+    });
+    const items = detail.json().data.items as Array<{
+      id: string;
+      difference: string | null;
+      differenceResolution: string | null;
+    }>;
+    for (const item of items) {
+      if (item.difference === null || item.differenceResolution !== null) continue;
+      const diff = Number(item.difference);
+      if (diff === 0) continue;
+      const kind = diff < 0 ? 'SHORTAGE_CONFIRMED' : 'SURPLUS_RESOLVED';
+      const resolveResponse = await app.inject({
+        method: 'POST',
+        url: `/api/shop/counts/${countId}/items/${item.id}/resolve-difference`,
+        headers: adminAuthHeader,
+        payload: { kind },
+      });
+      expect(resolveResponse.statusCode).toBe(200);
+    }
+  }
+
   /** Prepara + envía el conteo gobernante (con reconteo automático si hace
-   * falta, ver `submitGoverningCountAndComplete`) + confirma revisión --
-   * deja el cierre listo para `close` (`canClose === true`). */
+   * falta, ver `submitGoverningCountAndComplete`), resuelve TODAS sus
+   * diferencias (ver `resolveAllDifferences`) y confirma revisión -- deja
+   * el cierre listo para `close` (`canClose === true`). */
   async function readyToClose() {
     const prepared = await prepareClosing();
     const id = prepared.json().data.id as string;
-    await submitGoverningCountAndComplete();
+    const countResponse = await submitGoverningCountAndComplete();
+    await resolveAllDifferences(countResponse.json().data.id as string);
     await confirmReview(id);
     return id;
   }
@@ -1078,6 +1115,17 @@ describe('/api/weekly-closings', () => {
         payload: { locationId: locationShop, productId: productE.id, enteredQuantity: '5' },
       });
 
+      // Etapa 6.2.2, secciones 1/2/5 del prompt: el universo obligatorio del
+      // conteo es TODO producto activo de la organización -- A/B/C/D del
+      // `beforeEach` ya no son el foco de este test (que sólo le interesa
+      // Producto E, sin costo), así que se desactivan para que el universo
+      // obligatorio sea exactamente {Producto E}, sin tener que inventar
+      // valores/resoluciones de diferencia para productos irrelevantes acá.
+      await prisma.product.updateMany({
+        where: { organizationId, id: { in: [productA, productB, productC, productD] } },
+        data: { active: false },
+      });
+
       const prepared = await prepareClosing();
       const id = prepared.json().data.id as string;
       const countRes = await app.inject({
@@ -1092,6 +1140,13 @@ describe('/api/weekly-closings', () => {
         },
       });
       expect(countRes.statusCode).toBe(201);
+      // Producto E: real 5, teórico 0 (nunca se cargó stock inicial) ->
+      // sobrante +5 -- Etapa 6.2.2, secciones 7/8/11 del prompt: hay que
+      // resolverlo explícitamente antes de poder confirmar la revisión, sin
+      // que eso tenga nada que ver con el foco real de este test (el costo
+      // faltante).
+      const countId = countRes.json().data.id as string;
+      await resolveAllDifferences(countId);
       await confirmReview(id);
 
       const blocked = await closeClosing(id, 'cierre-sin-costo-1');
@@ -1280,6 +1335,186 @@ describe('/api/weekly-closings', () => {
         .data.items.find((i: { productId: string }) => i.productId === productA);
       expect(secondItem.unitCostWithTax).toBe('100.00'); // idéntico a la primera revisión
       expect(secondItem.totalValue).toBe('1200.00');
+    });
+  });
+
+  // Etapa 6.2.2, secciones 7-13 del prompt (BLOCKER): ninguna semana puede
+  // cerrarse con diferencias sin resolver, y nunca se genera un
+  // COUNT_CORRECTION sobre una diferencia pendiente -- letras H-O de la
+  // sección 20. Reusa el fixture común del `beforeEach` (productA +2
+  // sobrante, productB -5 faltante con reconteo obligatorio, productC sin
+  // diferencia, productD +3 sobrante con teórico negativo).
+  describe('diferencias pendientes bloquean el cierre (Etapa 6.2.2, letras H-O)', () => {
+    async function countCorrectionMovements() {
+      return prisma.inventoryMovement.findMany({
+        where: { organizationId, movementType: 'COUNT_CORRECTION' },
+      });
+    }
+
+    it('[H] una diferencia = 0 nunca requiere resolución (nunca aparece entre las pendientes)', async () => {
+      await submitGoverningCountAndComplete();
+      const prepared = await prepareClosing();
+      const id = prepared.json().data.id as string;
+      const detail = await getDetail(id);
+      const pending = detail.json().data.checklist.pendingDifferenceResolutions as Array<{
+        productId: string;
+      }>;
+      expect(pending.map((p) => p.productId)).not.toContain(productC);
+      // A (+2), B (-5) y D (+3) sí tienen diferencia distinta de cero y
+      // ninguna fue resuelta todavía -- las tres deben aparecer.
+      expect(pending.map((p) => p.productId).sort()).toEqual([productA, productB, productD].sort());
+    });
+
+    it('[I] un FALTANTE sin confirmar deja canClose en false', async () => {
+      await submitGoverningCountAndComplete();
+      const prepared = await prepareClosing();
+      const id = prepared.json().data.id as string;
+      const detail = await getDetail(id);
+      const checklist = detail.json().data.checklist;
+      expect(checklist.canClose).toBe(false);
+      const productBPending = checklist.pendingDifferenceResolutions.find(
+        (p: { productId: string }) => p.productId === productB,
+      );
+      expect(productBPending).toBeDefined();
+      expect(productBPending.reason).toBe('SHORTAGE_NOT_CONFIRMED');
+    });
+
+    it('[J] un FALTANTE confirmado (SHORTAGE_CONFIRMED) deja de figurar como pendiente y permite avanzar', async () => {
+      const countResponse = await submitGoverningCountAndComplete();
+      const prepared = await prepareClosing();
+      const id = prepared.json().data.id as string;
+      const countBody = countResponse.json().data;
+      const itemB = countBody.items.find((i: { productId: string }) => i.productId === productB);
+
+      const resolve = await app.inject({
+        method: 'POST',
+        url: `/api/shop/counts/${countBody.id}/items/${itemB.id}/resolve-difference`,
+        headers: adminAuthHeader,
+        payload: { kind: 'SHORTAGE_CONFIRMED' },
+      });
+      expect(resolve.statusCode).toBe(200);
+
+      const detail = await getDetail(id);
+      const pending = detail.json().data.checklist.pendingDifferenceResolutions as Array<{
+        productId: string;
+      }>;
+      expect(pending.map((p) => p.productId)).not.toContain(productB);
+    });
+
+    it('[K] un SOBRANTE sin resolver deja canClose en false', async () => {
+      await submitGoverningCountAndComplete();
+      const prepared = await prepareClosing();
+      const id = prepared.json().data.id as string;
+      const detail = await getDetail(id);
+      const checklist = detail.json().data.checklist;
+      expect(checklist.canClose).toBe(false);
+      const productAPending = checklist.pendingDifferenceResolutions.find(
+        (p: { productId: string }) => p.productId === productA,
+      );
+      expect(productAPending).toBeDefined();
+      expect(productAPending.reason).toBe('SURPLUS_NOT_RESOLVED');
+    });
+
+    it('[L] un SOBRANTE resuelto (SURPLUS_RESOLVED) deja de figurar como pendiente y permite avanzar', async () => {
+      const countResponse = await submitGoverningCountAndComplete();
+      const prepared = await prepareClosing();
+      const id = prepared.json().data.id as string;
+      const countBody = countResponse.json().data;
+      const itemA = countBody.items.find((i: { productId: string }) => i.productId === productA);
+
+      const resolve = await app.inject({
+        method: 'POST',
+        url: `/api/shop/counts/${countBody.id}/items/${itemA.id}/resolve-difference`,
+        headers: adminAuthHeader,
+        payload: { kind: 'SURPLUS_RESOLVED' },
+      });
+      expect(resolve.statusCode).toBe(200);
+
+      const detail = await getDetail(id);
+      const pending = detail.json().data.checklist.pendingDifferenceResolutions as Array<{
+        productId: string;
+      }>;
+      expect(pending.map((p) => p.productId)).not.toContain(productA);
+    });
+
+    it('[M] cerrar directamente con TODAS las diferencias sin resolver: rechazado (409), rollback total (nada se crea)', async () => {
+      await submitGoverningCountAndComplete();
+      const prepared = await prepareClosing();
+      const id = prepared.json().data.id as string;
+
+      // Ni siquiera se confirmó la revisión -- el cierre directo debe
+      // rechazarse citando las diferencias pendientes, nunca sólo "falta la
+      // revisión" en silencio.
+      const attempt = await closeClosing(id, 'cierre-diferencias-pendientes-m');
+      expect(attempt.statusCode).toBe(409);
+      expect(attempt.json().error.message).toMatch(/diferencia\(s\) pendientes de resolución/);
+      expect(attempt.json().error.message).toContain('Producto A');
+      expect(attempt.json().error.message).toContain('Producto B');
+      expect(attempt.json().error.message).toContain('Producto D');
+
+      const closing = await prisma.weeklyClosing.findUniqueOrThrow({ where: { id } });
+      expect(closing.status).toBe('OPEN');
+      expect(closing.closedAt).toBeNull();
+      expect(await countCorrectionMovements()).toHaveLength(0);
+      const snapshotCount = await prisma.inventorySnapshotItem.count({
+        where: { weeklyClosingId: id },
+      });
+      expect(snapshotCount).toBe(0);
+      const auditCount = await prisma.auditLog.count({
+        where: { entityId: id, action: 'WEEKLY_CLOSING_CLOSED' },
+      });
+      expect(auditCount).toBe(0);
+    });
+
+    it('[N] con la MAYORÍA de las diferencias resueltas pero UNA sola pendiente, el cierre sigue rechazado y no genera NINGÚN COUNT_CORRECTION (todo o nada)', async () => {
+      const countResponse = await submitGoverningCountAndComplete();
+      const prepared = await prepareClosing();
+      const id = prepared.json().data.id as string;
+      const countBody = countResponse.json().data;
+
+      // Se resuelven A (sobrante) y D (sobrante), pero se deja B (faltante)
+      // deliberadamente sin confirmar.
+      for (const productId of [productA, productD]) {
+        const item = countBody.items.find((i: { productId: string }) => i.productId === productId);
+        const resolve = await app.inject({
+          method: 'POST',
+          url: `/api/shop/counts/${countBody.id}/items/${item.id}/resolve-difference`,
+          headers: adminAuthHeader,
+          payload: { kind: 'SURPLUS_RESOLVED' },
+        });
+        expect(resolve.statusCode).toBe(200);
+      }
+
+      // La confirmación de revisión también queda bloqueada mientras quede
+      // UNA sola diferencia pendiente (capa 1 de la triple defensa).
+      const reviewAttempt = await confirmReview(id);
+      expect(reviewAttempt.statusCode).toBe(409);
+      expect(reviewAttempt.json().error.message).toContain('Producto B');
+
+      const attempt = await closeClosing(id, 'cierre-diferencias-pendientes-n');
+      expect(attempt.statusCode).toBe(409);
+      expect(attempt.json().error.message).toContain('Producto B');
+      expect(attempt.json().error.message).not.toContain('Producto A');
+      expect(attempt.json().error.message).not.toContain('Producto D');
+
+      expect(await countCorrectionMovements()).toHaveLength(0);
+      const closing = await prisma.weeklyClosing.findUniqueOrThrow({ where: { id } });
+      expect(closing.status).toBe('OPEN');
+    });
+
+    it('[O] con TODAS las diferencias resueltas, el cierre se completa y genera COUNT_CORRECTION sólo para las diferencias no nulas', async () => {
+      const id = await readyToClose();
+      const closeRes = await closeClosing(id, 'cierre-diferencias-pendientes-o');
+      expect(closeRes.statusCode).toBe(200);
+      expect(closeRes.json().data.closing.status).toBe('CLOSED');
+
+      const corrections = await countCorrectionMovements();
+      const correctedProductIds = corrections.map((m) => m.productId).sort();
+      // A (+2), B (-5) y D (+3) generan ajuste; C (diferencia 0) nunca.
+      expect(correctedProductIds).toEqual([productA, productB, productD].sort());
+
+      const closing = await prisma.weeklyClosing.findUniqueOrThrow({ where: { id } });
+      expect(closing.status).toBe('CLOSED');
     });
   });
 

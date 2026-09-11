@@ -21,6 +21,9 @@ export const CATALOG_AUDIT_ACTIONS = [
   'PRODUCT_UPDATED',
   'PRODUCT_ACTIVATED',
   'PRODUCT_DEACTIVATED',
+  /** Etapa 6.2.2 -- presentaciones físicas de conteo (sección 14/15 del prompt). */
+  'PRODUCT_COUNTING_PRESENTATION_CREATED',
+  'PRODUCT_COUNTING_PRESENTATION_DEACTIVATED',
 ] as const;
 export type CatalogAuditAction = (typeof CATALOG_AUDIT_ACTIONS)[number];
 

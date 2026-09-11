@@ -90,6 +90,7 @@ model Organization {
   priceReferenceProductMappings PriceReferenceProductMapping[]
   inventoryCountTypoCandidates  InventoryCountTypoCandidate[]
   generalWeeklyClosings         GeneralWeeklyClosing[]
+  productCountingPresentations  ProductCountingPresentation[]
 
   @@map("organization")
 }
@@ -337,6 +338,10 @@ model UnitOfMeasure {
   organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   products           Product[]
   inventoryMovements InventoryMovement[]
+  /// Etapa 6.2.2 -- una unidad de manejo puede ser, además, la presentación
+  /// de conteo de uno o más productos (ej. "Caja" como presentación de un
+  /// producto que se maneja normalmente en "Unidad").
+  countingPresentations ProductCountingPresentation[]
 
   @@unique([organizationId, code])
   /// Habilita la FK compuesta (organizationId, unitOfMeasureId) en Product — Etapa 2.1.
@@ -431,6 +436,11 @@ model Product {
   /// Etapa 6.2 -- mapeos de referencia de precio/costo Grido confirmados
   /// para este producto (a lo sumo uno activo por `priceType`).
   priceReferenceProductMappings PriceReferenceProductMapping[]
+  /// Etapa 6.2.2 -- presentaciones físicas de conteo configuradas para este
+  /// producto (Unidad/Caja/Pack, sección 14/15 del prompt). Vacío = el
+  /// producto sigue contándose con `unitOfMeasureId`/`unitsPerHandlingUnit`
+  /// tal cual (compatibilidad total, sección 16).
+  countingPresentations         ProductCountingPresentation[]
 
   @@unique([organizationId, code])
   /// Habilita la FK compuesta (organizationId, productId) desde InventoryMovement — Etapa 3.
@@ -808,6 +818,18 @@ model InventoryCountItem {
   /// la misma ubicación y se valorizan/reconcilian juntas contra el mismo
   /// teórico. CHECK >= 0 agregado a mano en la migración.
   depositoClosedUnits Int? @map("deposito_closed_units")
+  /// Etapa 6.2.2, secciones 14/15/17 del prompt: cuando el producto tiene
+  /// `ProductCountingPresentation` activas configuradas, `closedUnits` NO
+  /// se usa (sección 18: el backend rechaza recibir ambos a la vez) -- en
+  /// su lugar se registra acá, como snapshot histórico inmutable, EXACTAMENTE
+  /// lo que la empleada tipeó por presentación: `[{ presentationId,
+  /// unitOfMeasureName, quantity, conversionFactorToCanonical }]`. Mismo
+  /// criterio que el resto del proyecto para no perder trazabilidad (ver
+  /// `AuditLog.beforeValue`/`afterValue`) sin necesitar una tabla
+  /// relacional nueva sólo para esto. `physicalQuantity` ya incluye la suma
+  /// canónica resultante -- este campo es puramente informativo/histórico,
+  /// nunca se vuelve a leer para recalcular nada.
+  presentationBreakdown Json? @map("presentation_breakdown")
 
   /// Cantidad física, normalizada a la unidad canónica del producto (mismo
   /// concepto que `InventoryMovement.quantity`) -- calculada UNA VEZ por el
@@ -1906,4 +1928,63 @@ model InventorySnapshotItem {
   @@index([organizationId, weeklyClosingId])
   @@index([organizationId, priceValueId])
   @@map("inventory_snapshot_item")
+}
+
+/// Presentación física de conteo de un producto (Etapa 6.2.2, secciones
+/// 14/15/16 del prompt: "Unidad/Caja/Pack" observadas en las planillas
+/// reales -- CONFIRMADO que el modelo previo, una única
+/// `unitOfMeasureId`/`unitsPerHandlingUnit` por producto, no puede
+/// representar más de una presentación simultánea sin ambigüedad). Modelo
+/// GENÉRICO y ADITIVO, nunca hardcodeado a esos tres nombres: cualquier
+/// `UnitOfMeasure` ya sembrada (CAJA/LATA/UNIDAD, más las que un ADMIN
+/// agregue) puede ser una presentación de cualquier producto, cada una con
+/// su propio factor de conversión a la cantidad canónica.
+///
+/// Compatibilidad (sección 16): un producto SIN ninguna fila acá sigue
+/// contándose exactamente como antes, con `Product.unitOfMeasureId`/
+/// `unitsPerHandlingUnit` -- no se migró ningún dato existente a esta tabla
+/// nueva ni se generó automáticamente una fila equivalente, porque el
+/// campo `active` de esta tabla determina un camino de validación distinto
+/// en `computeItem` (`apps/api/src/services/inventory-count.ts`): en vez
+/// de generar filas redundantes para los ~200 productos ya sembrados, se
+/// interpreta "sin filas activas" como "seguir usando el campo simple" --
+/// exactamente equivalente y sin escribir nada.
+///
+/// Exclusivo de productos SIN sabor (sección 17 del prompt: "no mezclar el
+/// modelo especial de sabores con las presentaciones de productos
+/// cerrados") -- `createProductCountingPresentation` rechaza un producto
+/// con `flavorId` no nulo; la mecánica Salón/Depósito de Etapa 6.2.1 sigue
+/// siendo la única forma de contar un sabor, sin cambios.
+model ProductCountingPresentation {
+  id             String  @id @default(uuid()) @db.Uuid
+  organizationId String  @map("organization_id") @db.Uuid
+  productId      String  @map("product_id") @db.Uuid
+  /// La unidad de manejo que esta presentación representa (ej. "Caja",
+  /// "Pack", "Unidad") -- reutiliza el catálogo YA sembrado de
+  /// `UnitOfMeasure`, nunca un texto libre nuevo.
+  unitOfMeasureId String @map("unit_of_measure_id") @db.Uuid
+  /// Cuántas unidades CANÓNICAS representa UNA de esta presentación (ej.
+  /// Caja=24, Pack=6, Unidad=1) -- mismo concepto que
+  /// `Product.unitsPerHandlingUnit`, pero por presentación en vez de único
+  /// por producto. CHECK > 0 agregado a mano en la migración.
+  conversionFactorToCanonical Decimal @map("conversion_factor_to_canonical") @db.Decimal(14, 3)
+  active         Boolean @default(true)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  /// FKs compuestas -- garantizan que una presentación nunca referencie un
+  /// producto/unidad de OTRA organización (mismo patrón que el resto del
+  /// catálogo desde Etapa 2.1).
+  product       Product       @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  unitOfMeasure UnitOfMeasure @relation(fields: [organizationId, unitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
+
+  /// A lo sumo una presentación por producto y unidad de manejo -- evita
+  /// dos filas ambiguas para "Caja" del mismo producto con factores
+  /// distintos.
+  @@unique([organizationId, productId, unitOfMeasureId])
+  /// Habilita la FK compuesta (organizationId, presentationId) desde
+  /// cualquier consumidor futuro.
+  @@unique([organizationId, id])
+  @@index([organizationId, productId])
+  @@map("product_counting_presentation")
 }

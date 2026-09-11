@@ -72,6 +72,16 @@ export type TypoCandidateStatus = (typeof TYPO_CANDIDATE_STATUSES)[number];
  * valorizan/reconcilian juntas contra el mismo teórico. Ver
  * docs/ETAPA-6.2.1-CORRECCIONES-HITO1.md, sección "Sabores: Salón/Depósito"
  * para la decisión completa.
+ *
+ * `presentations` (Etapa 6.2.2, secciones 14/15/17/18 del prompt): SÓLO para
+ * un producto SIN sabor que tiene `ProductCountingPresentation` activas
+ * configuradas (Unidad/Caja/Pack u otras, nunca hardcodeadas) -- en ese caso
+ * reemplaza a `closedUnits` (mutuamente excluyentes, el backend rechaza
+ * recibir ambos) con una entrada por presentación cargada; `openUnits`/
+ * `openFraction`/`depositoClosedUnits` siguen sin aplicar a un producto sin
+ * sabor. Para un producto SIN presentaciones configuradas, `presentations`
+ * debe omitirse -- sigue usando `closedUnits` exactamente como antes
+ * (compatibilidad total, sección 16).
  */
 export interface InventoryCountDraftItem {
   productId: string;
@@ -79,6 +89,26 @@ export interface InventoryCountDraftItem {
   openUnits?: number;
   openFraction?: OpenContainerFraction;
   depositoClosedUnits?: number;
+  presentations?: PresentationQuantityInput[];
+}
+
+/** Una línea de `InventoryCountDraftItem.presentations` -- `quantity` es la
+ * cantidad FÍSICA de esa presentación (ej. "2 cajas"), nunca ya convertida:
+ * el backend multiplica por `conversionFactorToCanonical`, nunca el cliente
+ * (sección 18 del prompt). */
+export interface PresentationQuantityInput {
+  presentationId: string;
+  quantity: number;
+}
+
+/** Snapshot histórico e inmutable de lo que se tipeó por presentación,
+ * persistido en `InventoryCountItemResult.presentationBreakdown` -- nunca se
+ * vuelve a leer para recalcular nada (`physicalQuantity` ya trae la suma). */
+export interface PresentationBreakdownEntry {
+  presentationId: string;
+  unitOfMeasureName: string;
+  quantity: number;
+  conversionFactorToCanonical: string;
 }
 
 /**
@@ -119,6 +149,9 @@ export interface InventoryCountItemResult {
   /** Etapa 6.2.1 -- existencia de latas cerradas en el depósito propio de la
    * heladería, sólo para sabores. Ver `InventoryCountDraftItem`. */
   depositoClosedUnits: number | null;
+  /** Etapa 6.2.2 -- null salvo que el producto tenga presentaciones de
+   * conteo configuradas y se hayan usado en este ítem. */
+  presentationBreakdown: PresentationBreakdownEntry[] | null;
   /** String decimal (mismo criterio que `InventoryMovement.quantity`, Etapa 3.1). */
   physicalQuantity: string;
   theoreticalQuantity: string | null;

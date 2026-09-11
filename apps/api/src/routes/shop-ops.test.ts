@@ -137,8 +137,54 @@ describe('/api/shop', () => {
 
   // --- helpers -------------------------------------------------------------
 
+  /**
+   * Etapa 6.2.2, secciones 1/2/5 del prompt (BLOCKER): `submitInventoryCount`
+   * ahora exige que el conteo cubra TODO el universo de productos activos
+   * de la organización (nunca puede quedar COMPLETED con productos
+   * faltantes). Este archivo sólo tiene dos productos fijos
+   * (`productClosed`/`productFlavor`) -- se completa acá, en un único
+   * punto, cualquier producto que el test no haya mencionado explícitamente
+   * (con `closedUnits: 0`, "contado explícitamente en cero"), para que cada
+   * test siga probando SÓLO lo que le interesa sin tener que repetir el
+   * resto del catálogo en cada payload. `completeItems` es determinística
+   * (mismo orden siempre) para no alterar el fingerprint de idempotencia
+   * entre reintentos del mismo test.
+   */
+  function completeItems(
+    items: Array<{ productId: string } & Record<string, unknown>>,
+  ): Array<{ productId: string } & Record<string, unknown>> {
+    const present = new Set(items.map((i) => i.productId));
+    const filled = [...items];
+    for (const productId of [productClosed, productFlavor]) {
+      if (!present.has(productId)) {
+        filled.push({ productId, closedUnits: 0 });
+      }
+    }
+    return filled;
+  }
+
+  /** Busca un ítem por productId en vez de asumir un índice -- desde que
+   * `completeItems` puede agregar un segundo producto, el orden entre dos
+   * filas creadas en la misma transacción no está garantizado cuando
+   * `createdAt` empata (ver el comentario de `orderBy` en `countInclude`,
+   * `inventory-count.ts`). */
+  function itemFor(
+    body: { items: Array<{ productId: string } & Record<string, unknown>> },
+    productId: string,
+  ) {
+    const item = body.items.find((i) => i.productId === productId);
+    if (!item) throw new Error(`itemFor: no se encontró el producto ${productId} en la respuesta`);
+    return item;
+  }
+
   async function submitCount(headers: Record<string, string>, payload: Record<string, unknown>) {
-    return app.inject({ method: 'POST', url: '/api/shop/counts', headers, payload });
+    const items = payload.items as Array<{ productId: string } & Record<string, unknown>>;
+    return app.inject({
+      method: 'POST',
+      url: '/api/shop/counts',
+      headers,
+      payload: { ...payload, items: completeItems(items) },
+    });
   }
 
   async function loadInitialStock(locationId: string, productId: string, enteredQuantity: string) {
@@ -250,7 +296,7 @@ describe('/api/shop', () => {
         idempotencyKey: 'conteo-caja-unidad',
       });
       expect(response.statusCode).toBe(201);
-      const item = response.json().data.items[0];
+      const item = itemFor(response.json().data, productClosed);
       expect(item.physicalQuantity).toBe('29.000');
     });
 
@@ -263,7 +309,7 @@ describe('/api/shop', () => {
         idempotencyKey: 'conteo-sabor-fraccion',
       });
       expect(response.statusCode).toBe(201);
-      const item = response.json().data.items[0];
+      const item = itemFor(response.json().data, productFlavor);
       expect(item.physicalQuantity).toBe('3.500');
     });
 
@@ -285,7 +331,7 @@ describe('/api/shop', () => {
         idempotencyKey: 'conteo-sabor-deposito',
       });
       expect(response.statusCode).toBe(201);
-      const item = response.json().data.items[0];
+      const item = itemFor(response.json().data, productFlavor);
       expect(item.depositoClosedUnits).toBe(4);
       expect(item.physicalQuantity).toBe('6.500');
     });
@@ -321,7 +367,7 @@ describe('/api/shop', () => {
         idempotencyKey: 'conteo-ciego-diferencia',
       });
       expect(response.statusCode).toBe(201);
-      const item = response.json().data.items[0];
+      const item = itemFor(response.json().data, productFlavor);
       expect(item.theoreticalQuantity).toBe('20.000');
       expect(item.physicalQuantity).toBe('18.000');
       expect(item.difference).toBe('-2.000');
@@ -347,7 +393,7 @@ describe('/api/shop', () => {
       });
       expect(response.statusCode).toBe(201);
       const body = response.json().data;
-      expect(body.items[0].needsRecount).toBe(true);
+      expect(itemFor(body, productClosed).needsRecount).toBe(true);
       expect(body.status).toBe('RECOUNT_REQUIRED');
     });
 
@@ -363,7 +409,7 @@ describe('/api/shop', () => {
       });
       expect(response.statusCode).toBe(201);
       const body = response.json().data;
-      expect(body.items[0].needsRecount).toBe(false);
+      expect(itemFor(body, productClosed).needsRecount).toBe(false);
       expect(body.status).toBe('COMPLETED');
     });
 
@@ -378,7 +424,7 @@ describe('/api/shop', () => {
       });
       expect(response.statusCode).toBe(201);
       const body = response.json().data;
-      expect(body.items[0].needsRecount).toBe(false);
+      expect(itemFor(body, productClosed).needsRecount).toBe(false);
       expect(body.status).toBe('COMPLETED');
     });
 
@@ -393,7 +439,7 @@ describe('/api/shop', () => {
       });
       expect(response.statusCode).toBe(201);
       const body = response.json().data;
-      expect(body.items[0].needsRecount).toBe(true);
+      expect(itemFor(body, productClosed).needsRecount).toBe(true);
       expect(body.status).toBe('RECOUNT_REQUIRED');
     });
 
@@ -408,7 +454,7 @@ describe('/api/shop', () => {
       });
       expect(response.statusCode).toBe(201);
       const body = response.json().data;
-      expect(body.items[0].needsRecount).toBe(true);
+      expect(itemFor(body, productClosed).needsRecount).toBe(true);
       expect(body.status).toBe('RECOUNT_REQUIRED');
     });
 
@@ -621,9 +667,14 @@ describe('/api/shop', () => {
       expect(response.statusCode).toBe(200);
       const body = response.json().data;
       expect(body.status).toBe('COMPLETED');
-      expect(body.items[0].needsRecount).toBe(true); // se preserva el flag original
-      expect(body.items[0].recounted).toBe(true);
-      expect(body.items[0].physicalQuantity).toBe('960.000');
+      // Busca por productId, no por índice: `completeItems` agrega productFlavor
+      // al conteo original (Etapa 6.2.2, universo obligatorio del conteo), y el
+      // orden entre dos filas creadas en la misma transacción no está
+      // garantizado cuando `createdAt` empata.
+      const item = body.items.find((i: { productId: string }) => i.productId === productClosed);
+      expect(item.needsRecount).toBe(true); // se preserva el flag original
+      expect(item.recounted).toBe(true);
+      expect(item.physicalQuantity).toBe('960.000');
     });
 
     async function submitFlaggedCountTwoItems() {
@@ -790,8 +841,16 @@ describe('/api/shop', () => {
       expect(responseA.statusCode).toBe(200);
       expect(responseB.statusCode).toBe(200);
       expect(responseA.json().data.id).toBe(responseB.json().data.id);
-      expect(responseA.json().data.items[0].physicalQuantity).toBe('960.000');
-      expect(responseB.json().data.items[0].physicalQuantity).toBe('960.000');
+      // Busca por productId, no por índice -- ver el comentario del test
+      // anterior sobre `completeItems`/orden no garantizado.
+      const itemA = responseA
+        .json()
+        .data.items.find((i: { productId: string }) => i.productId === productClosed);
+      const itemB = responseB
+        .json()
+        .data.items.find((i: { productId: string }) => i.productId === productClosed);
+      expect(itemA.physicalQuantity).toBe('960.000');
+      expect(itemB.physicalQuantity).toBe('960.000');
 
       // Un único efecto persistido: el ítem no quedó escrito dos veces con
       // valores distintos, y una sola auditoría (no doble procesamiento).
@@ -881,7 +940,7 @@ describe('/api/shop', () => {
       });
       expect(response.statusCode).toBe(201);
       // productFlavor tiene unitsPerHandlingUnit = 1: 1 unidad * 0.2 * 1 = 0.200.
-      expect(response.json().data.items[0].physicalQuantity).toBe('0.200');
+      expect(itemFor(response.json().data, productFlavor).physicalQuantity).toBe('0.200');
     });
 
     it('sin configurar, rechaza con un error explícito de configuración (503), sin fallback ni NaN', async () => {
@@ -934,7 +993,9 @@ describe('/api/shop', () => {
           idempotencyKey: `fraccion-confirmada-${testCase.fraction}`,
         });
         expect(response.statusCode).toBe(201);
-        expect(response.json().data.items[0].physicalQuantity).toBe(testCase.expected);
+        expect(itemFor(response.json().data, productFlavor).physicalQuantity).toBe(
+          testCase.expected,
+        );
       }
     });
   });

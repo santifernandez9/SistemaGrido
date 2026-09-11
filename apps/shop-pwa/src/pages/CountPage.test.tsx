@@ -7,6 +7,7 @@ import type {
   InventoryCount,
   InventoryCountItemResult,
   Product,
+  ProductCountingPresentation,
   UserProfile,
 } from '@sistema-grido/shared-types';
 import { IDBFactory } from 'fake-indexeddb';
@@ -128,6 +129,44 @@ async function toggleCategory(user: ReturnType<typeof userEvent.setup>, category
   await user.click(screen.getByText(category));
 }
 
+/**
+ * Etapa 6.2.2, secciones 1/2/5 del prompt (BLOCKER): el botón "Enviar
+ * conteo" ahora exige que TODOS los productos activos del catálogo estén
+ * contados (nunca sólo el que le interesa a un test puntual). Este archivo
+ * usa un catálogo fijo de 3 productos (`PRODUCTS`) -- se completan acá, en
+ * un único lugar, los que un test no haya tocado explícitamente (con "0",
+ * "contado explícitamente en cero"), para que cada test siga probando SÓLO
+ * lo que le interesa sin repetir el resto del catálogo en cada caso.
+ */
+async function completeOtherProducts(
+  user: ReturnType<typeof userEvent.setup>,
+  excludeProductId: string,
+) {
+  const entries: Array<{ id: string; category: string; name: string; label: RegExp }> = [
+    {
+      id: 'prod-simple',
+      category: 'Categoría Inventada XYZ',
+      name: 'Vasito descartable',
+      label: /cerrados/i,
+    },
+    { id: 'prod-box', category: 'Insumos', name: 'Cucuruchos caja x12', label: /cerrados/i },
+    { id: 'prod-flavor', category: 'Sabores', name: 'Limón lata', label: /salón - cerrada/i },
+  ];
+  for (const entry of entries) {
+    if (entry.id === excludeProductId) continue;
+    const summary = screen.getByText(entry.category).closest('summary')!;
+    const details = summary.closest('details')!;
+    if (!details.open) {
+      await user.click(summary);
+    }
+    const row = screen.getByText(entry.name).closest('li')!;
+    const input = within(row).getByLabelText(entry.label) as HTMLInputElement;
+    if (input.value === '') {
+      await user.type(input, '0');
+    }
+  }
+}
+
 function baseRecountItem(overrides: Partial<InventoryCountItemResult>): InventoryCountItemResult {
   return {
     id: 'item-x',
@@ -138,6 +177,7 @@ function baseRecountItem(overrides: Partial<InventoryCountItemResult>): Inventor
     openUnits: null,
     openFraction: null,
     depositoClosedUnits: null,
+    presentationBreakdown: null,
     physicalQuantity: '0.000',
     theoreticalQuantity: '0.000',
     difference: '0.000',
@@ -153,11 +193,23 @@ function baseRecountItem(overrides: Partial<InventoryCountItemResult>): Inventor
 }
 
 describe('CountPage (shop-pwa)', () => {
+  let activePresentations: ProductCountingPresentation[] = [];
+
   beforeEach(() => {
     globalThis.indexedDB = new IDBFactory();
     apiGet.mockReset();
     apiPost.mockReset();
-    apiGet.mockResolvedValue(PRODUCTS);
+    activePresentations = [];
+    // `/api/products` vs `/api/products/counting-presentations` (Etapa
+    // 6.2.2, llamada en lote de una sola vez al cargar el conteo) --
+    // distinguidos por URL para que cada test pueda configurar
+    // `activePresentations` sin afectar el catálogo de productos.
+    apiGet.mockImplementation((url: string) => {
+      if (url === '/api/products/counting-presentations') {
+        return Promise.resolve(activePresentations);
+      }
+      return Promise.resolve(PRODUCTS);
+    });
   });
 
   describe('agrupado dinámico por rubro', () => {
@@ -281,6 +333,7 @@ describe('CountPage (shop-pwa)', () => {
       await toggleCategory(user, 'Insumos');
       const row = screen.getByText('Cucuruchos caja x12').closest('li')!;
       await user.type(within(row).getByLabelText(/cerrados/i), '1');
+      await completeOtherProducts(user, 'prod-box');
       await user.click(screen.getByRole('button', { name: /enviar conteo/i }));
 
       await screen.findByText('Reconteo');
@@ -307,20 +360,24 @@ describe('CountPage (shop-pwa)', () => {
       await user.type(within(row).getByLabelText(/salón - abierta/i), '3');
       await user.selectOptions(within(row).getByLabelText(/fracción/i), 'HALF');
       await user.type(within(row).getByLabelText(/depósito/i), '5');
+      await completeOtherProducts(user, 'prod-flavor');
 
       await user.click(screen.getByRole('button', { name: /enviar conteo/i }));
 
       await waitFor(() => expect(apiPost).toHaveBeenCalled());
       const [, body] = apiPost.mock.calls[0] as [string, { items: unknown[] }];
-      expect(body.items).toEqual([
-        {
-          productId: 'prod-flavor',
-          closedUnits: 2,
-          openUnits: 3,
-          openFraction: 'HALF',
-          depositoClosedUnits: 5,
-        },
-      ]);
+      // El ítem del sabor se envía tal cual se tipeó, sin ninguna
+      // multiplicación cliente-side -- los otros 2 productos del catálogo
+      // fijo de este archivo van completados en 0 (ver `completeOtherProducts`)
+      // para satisfacer la regla de completitud, sin ser el foco del test.
+      expect(body.items).toContainEqual({
+        productId: 'prod-flavor',
+        closedUnits: 2,
+        openUnits: 3,
+        openFraction: 'HALF',
+        depositoClosedUnits: 5,
+      });
+      expect(body.items).toHaveLength(3);
     });
 
     it('un sabor con SOLO depositoClosedUnits cargado (nada en Salón) igual se puede enviar', async () => {
@@ -332,12 +389,13 @@ describe('CountPage (shop-pwa)', () => {
       await toggleCategory(user, 'Sabores');
       const row = screen.getByText('Limón lata').closest('li')!;
       await user.type(within(row).getByLabelText(/depósito/i), '4');
+      await completeOtherProducts(user, 'prod-flavor');
 
       await user.click(screen.getByRole('button', { name: /enviar conteo/i }));
 
       await waitFor(() => expect(apiPost).toHaveBeenCalled());
       const [, body] = apiPost.mock.calls[0] as [string, { items: unknown[] }];
-      expect(body.items).toEqual([{ productId: 'prod-flavor', depositoClosedUnits: 4 }]);
+      expect(body.items).toContainEqual({ productId: 'prod-flavor', depositoClosedUnits: 4 });
     });
   });
 
@@ -396,6 +454,7 @@ describe('CountPage (shop-pwa)', () => {
       await toggleCategory(user, 'Insumos');
       const row = screen.getByText('Cucuruchos caja x12').closest('li')!;
       await user.type(within(row).getByLabelText(/cerrados/i), '4');
+      await completeOtherProducts(user, 'prod-box');
 
       await user.click(screen.getByRole('button', { name: /enviar conteo/i }));
       await screen.findByText(/no se pudo enviar el conteo/i);
@@ -419,6 +478,7 @@ describe('CountPage (shop-pwa)', () => {
       await toggleCategory(user, 'Insumos');
       const row = screen.getByText('Cucuruchos caja x12').closest('li')!;
       await user.type(within(row).getByLabelText(/cerrados/i), '1');
+      await completeOtherProducts(user, 'prod-box');
       await user.click(screen.getByRole('button', { name: /enviar conteo/i }));
 
       await screen.findByText('Conteo enviado');
@@ -464,6 +524,7 @@ describe('CountPage (shop-pwa)', () => {
       await toggleCategory(user, 'Insumos');
       const row = screen.getByText('Cucuruchos caja x12').closest('li')!;
       await user.type(within(row).getByLabelText(/cerrados/i), '1');
+      await completeOtherProducts(user, 'prod-box');
       await user.click(screen.getByRole('button', { name: /enviar conteo/i }));
 
       await screen.findByText('Reconteo');
@@ -504,6 +565,7 @@ describe('CountPage (shop-pwa)', () => {
       await toggleCategory(user, 'Sabores');
       const initialRow = screen.getByText('Limón lata').closest('li')!;
       await user.type(within(initialRow).getByLabelText(/salón - cerrada/i), '1');
+      await completeOtherProducts(user, 'prod-flavor');
       await user.click(screen.getByRole('button', { name: /enviar conteo/i }));
 
       await screen.findByText('Reconteo');
@@ -511,6 +573,188 @@ describe('CountPage (shop-pwa)', () => {
       expect(within(recountRow).getByLabelText(/salón - cerrada/i)).toBeInTheDocument();
       expect(within(recountRow).getByLabelText(/salón - abierta/i)).toBeInTheDocument();
       expect(within(recountRow).getByLabelText(/depósito/i)).toBeInTheDocument();
+    });
+  });
+
+  describe('completitud obligatoria del conteo (Etapa 6.2.2, secciones 1-6)', () => {
+    it('muestra el progreso real X/Y y el botón queda deshabilitado mientras falten productos', async () => {
+      const user = userEvent.setup();
+      renderCountPage();
+      await screen.findByText('Insumos');
+
+      expect(screen.getByText('0 de 3 productos contados.')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /enviar conteo/i })).toBeDisabled();
+
+      await toggleCategory(user, 'Insumos');
+      const row = screen.getByText('Cucuruchos caja x12').closest('li')!;
+      await user.type(within(row).getByLabelText(/cerrados/i), '1');
+
+      await waitFor(() =>
+        expect(screen.getByText('1 de 3 productos contados.')).toBeInTheDocument(),
+      );
+      expect(screen.getByRole('button', { name: /enviar conteo/i })).toBeDisabled();
+    });
+
+    it('un campo dejado VACÍO nunca cuenta como cero -- sólo un "0" tipeado explícitamente cuenta', async () => {
+      const user = userEvent.setup();
+      renderCountPage();
+      await screen.findByText('Insumos');
+      await toggleCategory(user, 'Insumos');
+
+      const row = screen.getByText('Cucuruchos caja x12').closest('li')!;
+      const input = within(row).getByLabelText(/cerrados/i);
+      // Foco + blur sin tipear nada -- el campo sigue vacío.
+      await user.click(input);
+      await user.tab();
+      expect(screen.getByText('0 de 3 productos contados.')).toBeInTheDocument();
+
+      await user.type(input, '0');
+      await waitFor(() =>
+        expect(screen.getByText('1 de 3 productos contados.')).toBeInTheDocument(),
+      );
+    });
+
+    it('lista los rubros con productos pendientes y saltar a uno los despliega', async () => {
+      const user = userEvent.setup();
+      const { container } = renderCountPage();
+      await screen.findByText('Insumos');
+
+      // Ningún rubro está desplegado todavía -- el resumen de pendientes
+      // permite saltar a uno sin tener que buscarlo manualmente.
+      const jumpButton = screen.getByRole('button', { name: /Insumos \(1\)/ });
+      const detailsBefore = container.querySelector('details.count-category');
+      expect(detailsBefore).not.toHaveAttribute('open');
+
+      await user.click(jumpButton);
+      const insumosDetails = screen.getByText('Insumos').closest('details')!;
+      expect(insumosDetails).toHaveAttribute('open');
+    });
+
+    it('al completar TODOS los productos, el resumen de pendientes desaparece y el botón se habilita', async () => {
+      const user = userEvent.setup();
+      renderCountPage();
+      await screen.findByText('Insumos');
+
+      await toggleCategory(user, 'Categoría Inventada XYZ');
+      await user.type(
+        within(screen.getByText('Vasito descartable').closest('li')!).getByLabelText(/cerrados/i),
+        '0',
+      );
+      await toggleCategory(user, 'Insumos');
+      await user.type(
+        within(screen.getByText('Cucuruchos caja x12').closest('li')!).getByLabelText(/cerrados/i),
+        '2',
+      );
+      await toggleCategory(user, 'Sabores');
+      await user.type(
+        within(screen.getByText('Limón lata').closest('li')!).getByLabelText(/salón - cerrada/i),
+        '3',
+      );
+
+      await waitFor(() =>
+        expect(screen.getByText('3 de 3 productos contados.')).toBeInTheDocument(),
+      );
+      expect(screen.queryByText(/Faltan \d+ producto/)).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /enviar conteo/i })).toBeEnabled();
+    });
+  });
+
+  describe('presentaciones dinámicas por producto (Etapa 6.2.2, secciones 14-18)', () => {
+    it('un producto con presentaciones activas muestra campos dinámicos por presentación, sin nombres hardcodeados, en vez de "Cerrados"', async () => {
+      activePresentations = [
+        {
+          id: 'pres-caja',
+          organizationId: 'org1',
+          productId: 'prod-box',
+          productName: 'Cucuruchos caja x12',
+          unitOfMeasureId: 'uom-caja',
+          unitOfMeasureName: 'Caja',
+          conversionFactorToCanonical: '12.000',
+          active: true,
+          createdAt: new Date().toISOString(),
+        },
+        {
+          id: 'pres-pallet',
+          organizationId: 'org1',
+          productId: 'prod-box',
+          productName: 'Cucuruchos caja x12',
+          // Nombre deliberadamente NO estándar -- prueba que no hay ningún
+          // hardcodeo de "Unidad/Caja/Pack" en la pantalla.
+          unitOfMeasureId: 'uom-pallet',
+          unitOfMeasureName: 'Pallet',
+          conversionFactorToCanonical: '144.000',
+          active: true,
+          createdAt: new Date().toISOString(),
+        },
+      ];
+      const user = userEvent.setup();
+      renderCountPage();
+      await screen.findByText('Insumos');
+      await toggleCategory(user, 'Insumos');
+
+      const row = screen.getByText('Cucuruchos caja x12').closest('li')!;
+      expect(within(row).queryByLabelText(/^cerrados/i)).not.toBeInTheDocument();
+      expect(within(row).getByLabelText('Caja')).toBeInTheDocument();
+      expect(within(row).getByLabelText('Pallet')).toBeInTheDocument();
+    });
+
+    it('envía `presentations` (nunca `closedUnits`) para un producto con presentaciones, sin multiplicar nada en el cliente', async () => {
+      activePresentations = [
+        {
+          id: 'pres-caja',
+          organizationId: 'org1',
+          productId: 'prod-box',
+          productName: 'Cucuruchos caja x12',
+          unitOfMeasureId: 'uom-caja',
+          unitOfMeasureName: 'Caja',
+          conversionFactorToCanonical: '12.000',
+          active: true,
+          createdAt: new Date().toISOString(),
+        },
+        {
+          id: 'pres-pack',
+          organizationId: 'org1',
+          productId: 'prod-box',
+          productName: 'Cucuruchos caja x12',
+          unitOfMeasureId: 'uom-pack',
+          unitOfMeasureName: 'Pack',
+          conversionFactorToCanonical: '6.000',
+          active: true,
+          createdAt: new Date().toISOString(),
+        },
+      ];
+      apiPost.mockResolvedValue({ id: 'count1', status: 'COMPLETED', items: [] });
+
+      const user = userEvent.setup();
+      renderCountPage();
+      await screen.findByText('Insumos');
+      await toggleCategory(user, 'Insumos');
+
+      const row = screen.getByText('Cucuruchos caja x12').closest('li')!;
+      await user.type(within(row).getByLabelText('Caja'), '2');
+      await user.type(within(row).getByLabelText('Pack'), '1');
+      await completeOtherProducts(user, 'prod-box');
+
+      await user.click(screen.getByRole('button', { name: /enviar conteo/i }));
+
+      await waitFor(() => expect(apiPost).toHaveBeenCalled());
+      const [, body] = apiPost.mock.calls[0] as [string, { items: Array<Record<string, unknown>> }];
+      const boxItem = body.items.find((i) => i.productId === 'prod-box')!;
+      expect(boxItem.closedUnits).toBeUndefined();
+      expect(boxItem.presentations).toEqual([
+        { presentationId: 'pres-caja', quantity: 2 },
+        { presentationId: 'pres-pack', quantity: 1 },
+      ]);
+    });
+
+    it('un producto sin presentaciones sigue mostrando "Cerrados" tal cual antes (compatibilidad total)', async () => {
+      renderCountPage();
+      await screen.findByText('Insumos');
+      const user = userEvent.setup();
+      await toggleCategory(user, 'Insumos');
+
+      const row = screen.getByText('Cucuruchos caja x12').closest('li')!;
+      expect(within(row).getByLabelText(/cerrados/i)).toBeInTheDocument();
     });
   });
 });

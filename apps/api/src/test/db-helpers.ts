@@ -36,6 +36,9 @@ export async function resetCoreTables(): Promise<void> {
   await prisma.priceListImport.deleteMany();
   await prisma.priceReference.deleteMany();
   await prisma.inventoryMovement.deleteMany();
+  // Etapa 6.2.2: ProductCountingPresentation referencia Product -- tiene que
+  // borrarse antes.
+  await prisma.productCountingPresentation.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
   await prisma.productType.deleteMany();

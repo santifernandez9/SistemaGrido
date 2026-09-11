@@ -8,6 +8,7 @@ import type {
   InventoryCountTypoCandidate as TypoCandidateDto,
   Page,
   PageInput,
+  PresentationBreakdownEntry,
   SubmitInventoryCountInput,
   SubmitInventoryRecountInput,
 } from '@sistema-grido/shared-types';
@@ -21,6 +22,10 @@ import {
 import { openContainerFractionMultiplier } from './bulk-flavor.js';
 import { isUniqueConstraintViolationOn } from './idempotency.js';
 import { resolveEffectivePricesForProducts } from './price-reference-mapping.js';
+import {
+  getActiveCountingPresentationsForProducts,
+  type PresentationRow,
+} from './product-counting-presentation.js';
 
 /**
  * Conteo físico semanal, ciego, por sabor y por producto cerrado (RF-012,
@@ -44,7 +49,12 @@ const countInclude = {
       product: { select: { name: true, code: true } },
       differenceResolvedBy: { select: { displayName: true } },
     },
-    orderBy: { createdAt: 'asc' as const },
+    // `id: 'asc'` como desempate estable: dos ítems creados en la misma
+    // transacción pueden tener el mismo `createdAt` (mismo timestamp de
+    // Postgres), y sin un segundo criterio el orden entre ellos no está
+    // garantizado -- nunca asumir un orden implícito basado sólo en
+    // `createdAt` cuando puede haber empates.
+    orderBy: [{ createdAt: 'asc' as const }, { id: 'asc' as const }],
   },
   typoCandidates: {
     include: {
@@ -70,6 +80,8 @@ function mapCountItem(row: CountItemRow): InventoryCountItemResult {
     openUnits: row.openUnits,
     openFraction: row.openFraction,
     depositoClosedUnits: row.depositoClosedUnits,
+    presentationBreakdown:
+      (row.presentationBreakdown as PresentationBreakdownEntry[] | null) ?? null,
     physicalQuantity: row.physicalQuantity.toFixed(3),
     theoreticalQuantity: row.theoreticalQuantity?.toFixed(3) ?? null,
     difference: row.difference?.toFixed(3) ?? null,
@@ -167,11 +179,23 @@ function exceedsMandatoryShortagePercentage(
  * la dirección). Se llama DENTRO de la transacción que deja el conteo
  * COMPLETED (directo o tras reconteo) -- nunca antes, para trabajar siempre
  * sobre las diferencias FINALES. Nunca modifica `Sale`/`InventoryMovement`.
+ *
+ * Etapa 6.2.2, sección 13 del prompt (CORRECCIÓN, CONFIRMADO): el precio de
+ * VENTA usado como evidencia debe ser el vigente para la SEMANA del conteo
+ * que se está analizando, nunca "ahora" (el instante en que el backend
+ * procesa el envío) -- mismo razonamiento y mismo mecanismo que la
+ * corrección de `asOfDate` en la valorización del cierre (Etapa 6.2.1,
+ * sección 9): analizar hoy un conteo viejo (ej. al confirmar tarde un
+ * reconteo, o simplemente por la fecha real del servidor) no debe usar un
+ * precio que cambió DESPUÉS de esa semana. `asOfDate` la pasa el llamador,
+ * calculada una sola vez a partir de `InventoryCount.weekStart` (el domingo
+ * de esa semana, `weekEndDate`) -- nunca `new Date()`.
  */
 async function detectAndPersistTypoCandidates(
   tx: Prisma.TransactionClient,
   organizationId: string,
   countId: string,
+  asOfDate: Date,
 ): Promise<void> {
   const items = await tx.inventoryCountItem.findMany({
     where: { organizationId, countId },
@@ -187,7 +211,7 @@ async function detectAndPersistTypoCandidates(
     organizationId,
     productIds,
     'SALE_PRICE',
-    new Date(),
+    asOfDate,
   );
 
   for (const shortage of shortages) {
@@ -235,6 +259,17 @@ function canonicalItemsForFingerprint(items: InventoryCountDraftItem[]) {
       openUnits: item.openUnits ?? null,
       openFraction: item.openFraction ?? null,
       depositoClosedUnits: item.depositoClosedUnits ?? null,
+      // Etapa 6.2.2: sin esto, dos envíos con el MISMO idempotencyKey pero
+      // presentaciones DISTINTAS para un producto (ej. "2 cajas" vs "3
+      // cajas") serían indistinguibles para la reconsulta de idempotencia
+      // -- quedaría silenciosamente devolviendo el resultado del primero.
+      // Ordenado por `presentationId` para que el orden en que se tipeó
+      // cada presentación no altere la huella.
+      presentations: item.presentations
+        ? [...item.presentations]
+            .map((p) => ({ presentationId: p.presentationId, quantity: p.quantity }))
+            .sort((a, b) => a.presentationId.localeCompare(b.presentationId))
+        : null,
     }))
     .sort((a, b) => a.productId.localeCompare(b.productId));
 }
@@ -360,12 +395,23 @@ function parseWeekStart(weekStart: string): Date {
   return date;
 }
 
+/** Domingo de la semana contada (`weekStart + 6 días`) -- misma noción de
+ * "fecha estable del período" que `closing.periodEnd` en weekly-closing.ts
+ * (Etapa 6.2.1, sección 9), usada acá para resolver el precio de venta
+ * histórico de `detectAndPersistTypoCandidates`. */
+function weekEndDate(weekStart: Date): Date {
+  const end = new Date(weekStart);
+  end.setUTCDate(end.getUTCDate() + 6);
+  return end;
+}
+
 interface ComputedItem {
   productId: string;
   closedUnits: number | null;
   openUnits: number | null;
   openFraction: InventoryCountDraftItem['openFraction'] | null;
   depositoClosedUnits: number | null;
+  presentationBreakdown: PresentationBreakdownEntry[] | null;
   physicalQuantity: Prisma.Decimal;
 }
 
@@ -376,6 +422,7 @@ async function computeItem(
   fastify: FastifyInstance,
   organizationId: string,
   item: InventoryCountDraftItem,
+  presentationsByProduct: Map<string, PresentationRow[]>,
 ): Promise<ComputedItem> {
   const product = await assertProductForMovement(fastify, organizationId, item.productId);
 
@@ -383,6 +430,7 @@ async function computeItem(
   const openUnits = item.openUnits ?? null;
   const openFraction = item.openFraction ?? null;
   const depositoClosedUnits = item.depositoClosedUnits ?? null;
+  const presentations = item.presentations ?? null;
 
   if (closedUnits !== null && (!Number.isInteger(closedUnits) || closedUnits < 0)) {
     throw new ValidationError(`Cantidad de cerrados inválida para el producto ${product.name}`);
@@ -420,14 +468,80 @@ async function computeItem(
       `Cantidad de existencia en depósito inválida para el producto ${product.name}`,
     );
   }
-  if (closedUnits === null && openUnits === null && depositoClosedUnits === null) {
+
+  // Etapa 6.2.2, secciones 14/15/16/17/18 del prompt: si el producto tiene
+  // presentaciones de conteo ACTIVAS configuradas (Unidad/Caja/Pack u
+  // otras), `presentations` REEMPLAZA a `closedUnits` para ese ítem -- los
+  // dos a la vez son ambiguos (¿cuál manda?) y se rechazan explícitamente.
+  // Un producto SIN presentaciones configuradas sigue usando `closedUnits`
+  // tal cual (compatibilidad total, sección 16) -- enviar `presentations`
+  // para un producto así también se rechaza (no hay nada que resolver).
+  const activePresentations = presentationsByProduct.get(product.id) ?? [];
+  let presentationBreakdown: PresentationBreakdownEntry[] | null = null;
+  let closedContribution: Prisma.Decimal;
+  const conversionFactor = new Prisma.Decimal(product.unitsPerHandlingUnit);
+
+  if (activePresentations.length > 0) {
+    if (closedUnits !== null) {
+      throw new ValidationError(
+        `El producto ${product.name} tiene presentaciones de conteo configuradas: usá "presentations" en vez de "closedUnits"`,
+      );
+    }
+    if (presentations === null || presentations.length === 0) {
+      throw new ValidationError(
+        `Debe indicarse la cantidad contada por presentación para ${product.name}`,
+      );
+    }
+    const presentationById = new Map(activePresentations.map((p) => [p.id, p]));
+    const seenPresentationIds = new Set<string>();
+    let sum = new Prisma.Decimal(0);
+    const breakdown: PresentationBreakdownEntry[] = [];
+    for (const entry of presentations) {
+      if (seenPresentationIds.has(entry.presentationId)) {
+        throw new ValidationError(`Presentación duplicada en el mismo ítem para ${product.name}`);
+      }
+      seenPresentationIds.add(entry.presentationId);
+      const presentation = presentationById.get(entry.presentationId);
+      if (!presentation) {
+        throw new ValidationError(
+          `La presentación indicada no existe, no está activa, o no pertenece a ${product.name}`,
+        );
+      }
+      if (!Number.isInteger(entry.quantity) || entry.quantity < 0) {
+        throw new ValidationError(`Cantidad inválida para una presentación de ${product.name}`);
+      }
+      sum = sum.add(
+        new Prisma.Decimal(entry.quantity).mul(presentation.conversionFactorToCanonical),
+      );
+      breakdown.push({
+        presentationId: presentation.id,
+        unitOfMeasureName: presentation.unitOfMeasure.name,
+        quantity: entry.quantity,
+        conversionFactorToCanonical: presentation.conversionFactorToCanonical.toFixed(3),
+      });
+    }
+    closedContribution = sum;
+    presentationBreakdown = breakdown;
+  } else {
+    if (presentations !== null) {
+      throw new ValidationError(
+        `El producto ${product.name} no tiene presentaciones de conteo configuradas`,
+      );
+    }
+    closedContribution = closedUnits
+      ? new Prisma.Decimal(closedUnits).mul(conversionFactor)
+      : new Prisma.Decimal(0);
+  }
+
+  if (
+    closedUnits === null &&
+    openUnits === null &&
+    depositoClosedUnits === null &&
+    presentationBreakdown === null
+  ) {
     throw new ValidationError(`Debe indicarse alguna cantidad contada para ${product.name}`);
   }
 
-  const conversionFactor = new Prisma.Decimal(product.unitsPerHandlingUnit);
-  const closedContribution = closedUnits
-    ? new Prisma.Decimal(closedUnits).mul(conversionFactor)
-    : new Prisma.Decimal(0);
   const openContribution = openFraction
     ? new Prisma.Decimal(openUnits ?? 0)
         .mul(openContainerFractionMultiplier(fastify, openFraction))
@@ -447,6 +561,7 @@ async function computeItem(
     openUnits,
     openFraction,
     depositoClosedUnits,
+    presentationBreakdown,
     physicalQuantity: closedContribution.add(openContribution).add(depositoContribution),
   };
 }
@@ -492,6 +607,35 @@ export async function submitInventoryCount(
   );
   if (idempotent) return idempotent;
 
+  // Etapa 6.2.2, secciones 1/2/5 del prompt (BLOCKER, CONFIRMADO): el
+  // conteo semanal INICIAL debe cubrir el universo obligatorio completo --
+  // nunca puede quedar COMPLETED con productos faltantes. El universo se
+  // determina de forma AUTORITATIVA en el backend, nunca confiando en lo
+  // que mandó el cliente: todo producto ACTIVO de esta organización (el
+  // catálogo de Etapa 2 no tiene ninguna distinción explícita de
+  // "inventariable/no contable" todavía -- sección 2 del prompt: "si no
+  // existe esa distinción, no inventarla silenciosamente" -- así que se usa
+  // la interpretación más consistente con el sistema actual: exactamente el
+  // mismo conjunto que ya devuelve `GET /api/products` filtrado por
+  // `active`, que es lo que la Shop PWA ya carga y muestra para contar
+  // desde Etapa 6.2.1). El catálogo es único por organización, sin
+  // restricción por ubicación en el modelo actual -- no hay nada que
+  // filtrar por `locationId` acá (documentado, no inventado). Se valida
+  // ANTES de tocar la base (ningún `InventoryCount` parcial) y DESPUÉS de
+  // la resolución de idempotencia (un reintento de un envío que ya tuvo
+  // éxito nunca debe fallar retroactivamente por cambios posteriores del
+  // catálogo).
+  const requiredProducts = await fastify.db.product.findMany({
+    where: { organizationId, active: true },
+    select: { id: true, name: true },
+  });
+  const missingProducts = requiredProducts.filter((p) => !productIds.has(p.id));
+  if (missingProducts.length > 0) {
+    throw new ValidationError(
+      `Faltan ${missingProducts.length} producto(s) por contar: ${missingProducts.map((p) => p.name).join(', ')}`,
+    );
+  }
+
   await assertLocationForMovement(fastify, organizationId, input.locationId);
 
   const existingForWeek = await fastify.db.inventoryCount.findFirst({
@@ -501,8 +645,13 @@ export async function submitInventoryCount(
     throw new ConflictError('Ya existe un conteo cargado para esta ubicación en esta semana.');
   }
 
+  const presentationsByProduct = await getActiveCountingPresentationsForProducts(
+    fastify.db,
+    organizationId,
+    [...productIds],
+  );
   const computedItems = await Promise.all(
-    input.items.map((item) => computeItem(fastify, organizationId, item)),
+    input.items.map((item) => computeItem(fastify, organizationId, item, presentationsByProduct)),
   );
 
   const balances = await getStockBalances(fastify, organizationId, {
@@ -561,6 +710,9 @@ export async function submitInventoryCount(
               openUnits: item.openUnits,
               openFraction: item.openFraction ?? undefined,
               depositoClosedUnits: item.depositoClosedUnits,
+              presentationBreakdown: item.presentationBreakdown
+                ? (item.presentationBreakdown as unknown as Prisma.InputJsonValue)
+                : undefined,
               physicalQuantity: item.physicalQuantity,
               theoreticalQuantity: item.theoreticalQuantity,
               difference: item.difference,
@@ -577,7 +729,7 @@ export async function submitInventoryCount(
       // todavía no son finales; la detección se repite al completar el
       // reconteo (ver `submitInventoryRecount`).
       if (status === 'COMPLETED') {
-        await detectAndPersistTypoCandidates(tx, organizationId, count.id);
+        await detectAndPersistTypoCandidates(tx, organizationId, count.id, weekEndDate(weekStart));
       }
 
       await fastify.audit.logTx(tx, {
@@ -695,8 +847,13 @@ export async function submitInventoryRecount(
     throw new ConflictError('Este conteo no está esperando un reconteo.');
   }
 
+  const presentationsByProduct = await getActiveCountingPresentationsForProducts(
+    fastify.db,
+    organizationId,
+    input.items.map((item) => item.productId),
+  );
   const computedItems = await Promise.all(
-    input.items.map((item) => computeItem(fastify, organizationId, item)),
+    input.items.map((item) => computeItem(fastify, organizationId, item, presentationsByProduct)),
   );
   const currentByProduct = new Map(count.items.map((i) => [i.productId, i]));
 
@@ -736,6 +893,9 @@ export async function submitInventoryRecount(
             openUnits: item.openUnits,
             openFraction: item.openFraction ?? null,
             depositoClosedUnits: item.depositoClosedUnits,
+            presentationBreakdown: item.presentationBreakdown
+              ? (item.presentationBreakdown as unknown as Prisma.InputJsonValue)
+              : Prisma.JsonNull,
             physicalQuantity: item.physicalQuantity,
             difference,
             recounted: true,
@@ -745,8 +905,16 @@ export async function submitInventoryRecount(
 
       // El reconteo siempre deja el conteo COMPLETED (una sola ronda
       // adicional) -- las diferencias ya son finales, se detectan
-      // candidatos de tipeo acá (sección 6 del prompt de Etapa 6.2).
-      await detectAndPersistTypoCandidates(tx, organizationId, countId);
+      // candidatos de tipeo acá (sección 6 del prompt de Etapa 6.2), usando
+      // el mismo `weekEndDate(count.weekStart)` que el envío original --
+      // ambos analizan la MISMA semana, nunca "ahora" (sección 13 del
+      // prompt de Etapa 6.2.2).
+      await detectAndPersistTypoCandidates(
+        tx,
+        organizationId,
+        countId,
+        weekEndDate(count.weekStart),
+      );
 
       await fastify.audit.logTx(tx, {
         organizationId,

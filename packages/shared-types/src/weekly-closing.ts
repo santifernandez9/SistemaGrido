@@ -92,8 +92,24 @@ export interface WeeklyClosingChecklist {
   /** Etapa 6.2, sección 11 del prompt -- productos con stock real sin costo
    * COST_WITH_TAX vigente resoluble. No vacío bloquea el cierre. */
   missingCostProducts: WeeklyClosingMissingCostProduct[];
-  /** = countSubmitted && reviewConfirmedById !== null && missingCostProducts.length === 0 && status !== 'CLOSED'. */
+  /** Etapa 6.2.2, secciones 7/8/10 del prompt (CONFIRMADO, corrige un
+   * blocker real): toda diferencia distinta de cero del conteo gobernante
+   * que todavía no tiene una resolución explícita válida -- un FALTANTE sin
+   * `SHORTAGE_CONFIRMED` o un SOBRANTE sin `SURPLUS_RESOLVED`. No vacío
+   * bloquea el cierre (una diferencia = 0 nunca aparece acá, no requiere
+   * resolución). */
+  pendingDifferenceResolutions: WeeklyClosingPendingDifferenceResolution[];
+  /** = countSubmitted && reviewConfirmedById !== null && missingCostProducts.length === 0 && pendingDifferenceResolutions.length === 0 && status !== 'CLOSED'. */
   canClose: boolean;
+}
+
+/** Ver `WeeklyClosingChecklist.pendingDifferenceResolutions`. */
+export interface WeeklyClosingPendingDifferenceResolution {
+  productId: string;
+  productName: string;
+  /** String decimal -- la diferencia histórica (real - teórico) sin resolver. */
+  difference: string;
+  reason: 'SHORTAGE_NOT_CONFIRMED' | 'SURPLUS_NOT_RESOLVED';
 }
 
 /**

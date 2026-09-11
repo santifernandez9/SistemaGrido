@@ -112,12 +112,18 @@ async function resolveLocationFilter(
 
 // --- Conteo físico semanal (RF-012/RF-020) ---------------------------------
 
+const presentationQuantitySchema = z.object({
+  presentationId: z.string().uuid(),
+  quantity: z.number().int().nonnegative(),
+});
+
 const countItemSchema = z.object({
   productId: z.string().uuid(),
   closedUnits: z.number().int().nonnegative().optional(),
   openUnits: z.number().int().nonnegative().optional(),
   openFraction: z.enum(OPEN_CONTAINER_FRACTIONS).optional(),
   depositoClosedUnits: z.number().int().nonnegative().optional(),
+  presentations: z.array(presentationQuantitySchema).min(1).optional(),
 });
 
 const submitCountSchema = z.object({
