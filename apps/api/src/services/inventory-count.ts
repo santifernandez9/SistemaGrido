@@ -5,6 +5,7 @@ import type {
   InventoryCountDraftItem,
   InventoryCountFilters,
   InventoryCountItemResult,
+  InventoryCountTypoCandidate as TypoCandidateDto,
   Page,
   PageInput,
   SubmitInventoryCountInput,
@@ -19,6 +20,7 @@ import {
 } from './inventory-ledger.js';
 import { openContainerFractionMultiplier } from './bulk-flavor.js';
 import { isUniqueConstraintViolationOn } from './idempotency.js';
+import { resolveEffectivePricesForProducts } from './price-reference-mapping.js';
 
 /**
  * Conteo físico semanal, ciego, por sabor y por producto cerrado (RF-012,
@@ -38,13 +40,25 @@ const countInclude = {
   location: { select: { name: true } },
   createdBy: { select: { displayName: true } },
   items: {
-    include: { product: { select: { name: true, code: true } } },
+    include: {
+      product: { select: { name: true, code: true } },
+      differenceResolvedBy: { select: { displayName: true } },
+    },
+    orderBy: { createdAt: 'asc' as const },
+  },
+  typoCandidates: {
+    include: {
+      shortageItem: { select: { productId: true, product: { select: { name: true } } } },
+      surplusItem: { select: { productId: true, product: { select: { name: true } } } },
+      resolvedBy: { select: { displayName: true } },
+    },
     orderBy: { createdAt: 'asc' as const },
   },
 } satisfies Prisma.InventoryCountInclude;
 
 type CountRow = Prisma.InventoryCountGetPayload<{ include: typeof countInclude }>;
 type CountItemRow = CountRow['items'][number];
+type TypoCandidateRow = CountRow['typoCandidates'][number];
 
 function mapCountItem(row: CountItemRow): InventoryCountItemResult {
   return {
@@ -60,6 +74,32 @@ function mapCountItem(row: CountItemRow): InventoryCountItemResult {
     difference: row.difference?.toFixed(3) ?? null,
     needsRecount: row.needsRecount,
     recounted: row.recounted,
+    differenceResolution: row.differenceResolution,
+    differenceResolvedById: row.differenceResolvedById,
+    differenceResolvedByName: row.differenceResolvedBy?.displayName ?? null,
+    differenceResolvedAt: row.differenceResolvedAt?.toISOString() ?? null,
+    differenceResolutionNote: row.differenceResolutionNote,
+  };
+}
+
+function mapTypoCandidate(row: TypoCandidateRow): TypoCandidateDto {
+  return {
+    id: row.id,
+    countId: row.countId,
+    shortageItemId: row.shortageItemId,
+    shortageProductId: row.shortageItem.productId,
+    shortageProductName: row.shortageItem.product.name,
+    surplusItemId: row.surplusItemId,
+    surplusProductId: row.surplusItem.productId,
+    surplusProductName: row.surplusItem.product.name,
+    compensatingQuantity: row.compensatingQuantity.toFixed(3),
+    salePriceUsed: row.salePriceUsed.toFixed(2),
+    status: row.status,
+    resolvedById: row.resolvedById,
+    resolvedByName: row.resolvedBy?.displayName ?? null,
+    resolvedAt: row.resolvedAt?.toISOString() ?? null,
+    resolutionNote: row.resolutionNote,
+    createdAt: row.createdAt.toISOString(),
   };
 }
 
@@ -77,7 +117,113 @@ function mapCount(row: CountRow): InventoryCountDto {
     createdById: row.createdById,
     createdByName: row.createdBy.displayName,
     items: row.items.map(mapCountItem),
+    typoCandidates: row.typoCandidates.map(mapTypoCandidate),
   };
+}
+
+/**
+ * Umbral PORCENTUAL obligatorio de reconteo por faltante (Etapa 6.2, sección
+ * 4 del prompt, CONFIRMADO textualmente por el cliente: "un faltante ≥25%
+ * del teórico dispara reconteo obligatorio"). A diferencia de
+ * `RECOUNT_THRESHOLD_CLOSED_PRODUCTS`/`RECOUNT_THRESHOLD_BULK_FLAVOR`
+ * (umbrales ABSOLUTOS, opcionales, nunca confirmados con un valor concreto
+ * -- Etapa 4.1), este 25% SÍ es un literal confirmado por el cliente, igual
+ * criterio que las fracciones de `OpenContainerFraction` -- se usa como
+ * constante, sin exponerlo como variable de entorno. Es una regla ADICIONAL
+ * sobre el MISMO campo `needsRecount`/estado `RECOUNT_REQUIRED` de Etapa 4
+ * (nunca un sistema paralelo): el estado final es la unión de ambas reglas.
+ * Sólo aplica a FALTANTES (RN nueva, sección 4: nunca a sobrantes -- un
+ * sobrante grande puede disparar el umbral ABSOLUTO si está configurado,
+ * pero no este 25%, que es específico de faltante).
+ */
+const MANDATORY_SHORTAGE_RECOUNT_PERCENTAGE = new Prisma.Decimal('0.25');
+
+/**
+ * = |difference| / theoreticalQuantity >= 25%, sólo para FALTANTE
+ * (difference negativo). Maneja teórico cero o negativo SIN dividir por
+ * cero/negativo (sección 4 del prompt): en ese caso el porcentaje no está
+ * definido de forma significativa, así que esta regla simplemente no se
+ * activa -- el umbral ABSOLUTO configurado (si existe) sigue disponible
+ * para cubrir ese caso por su cuenta, sin necesitar una convención inventada
+ * de "qué es un 25% de un teórico negativo".
+ */
+function exceedsMandatoryShortagePercentage(
+  difference: Prisma.Decimal,
+  theoreticalQuantity: Prisma.Decimal,
+): boolean {
+  if (!difference.isNegative()) return false;
+  if (theoreticalQuantity.lessThanOrEqualTo(0)) return false;
+  const shortagePercentage = difference.abs().div(theoreticalQuantity);
+  return shortagePercentage.greaterThanOrEqualTo(MANDATORY_SHORTAGE_RECOUNT_PERCENTAGE);
+}
+
+/**
+ * Posible error de tipeo (Etapa 6.2, sección 6 del prompt, CONFIRMADO): un
+ * FALTANTE en un producto compensado EXACTAMENTE por un SOBRANTE en otro,
+ * ambos con el MISMO precio de VENTA vigente (nunca costo). Genera TODAS
+ * las combinaciones que califiquen -- soporta múltiples candidatos
+ * ambiguos sin decidir cuál es "el correcto" (sección 6: nunca decidir sola
+ * la dirección). Se llama DENTRO de la transacción que deja el conteo
+ * COMPLETED (directo o tras reconteo) -- nunca antes, para trabajar siempre
+ * sobre las diferencias FINALES. Nunca modifica `Sale`/`InventoryMovement`.
+ */
+async function detectAndPersistTypoCandidates(
+  tx: Prisma.TransactionClient,
+  organizationId: string,
+  countId: string,
+): Promise<void> {
+  const items = await tx.inventoryCountItem.findMany({
+    where: { organizationId, countId },
+    select: { id: true, productId: true, difference: true },
+  });
+  const shortages = items.filter((i) => i.difference !== null && i.difference.isNegative());
+  const surpluses = items.filter((i) => i.difference !== null && i.difference.isPositive());
+  if (shortages.length === 0 || surpluses.length === 0) return;
+
+  const productIds = [...new Set([...shortages, ...surpluses].map((i) => i.productId))];
+  const priceByProduct = await resolveEffectivePricesForProducts(
+    tx,
+    organizationId,
+    productIds,
+    'SALE_PRICE',
+    new Date(),
+  );
+
+  for (const shortage of shortages) {
+    const shortagePrice = priceByProduct.get(shortage.productId);
+    if (!shortagePrice || shortagePrice.status !== 'OK') continue;
+
+    for (const surplus of surpluses) {
+      if (surplus.productId === shortage.productId) continue;
+      if (!shortage.difference!.abs().equals(surplus.difference!)) continue;
+
+      const surplusPrice = priceByProduct.get(surplus.productId);
+      if (!surplusPrice || surplusPrice.status !== 'OK') continue;
+      if (!shortagePrice.value.equals(surplusPrice.value)) continue;
+
+      await tx.inventoryCountTypoCandidate.upsert({
+        where: {
+          organizationId_countId_shortageItemId_surplusItemId: {
+            organizationId,
+            countId,
+            shortageItemId: shortage.id,
+            surplusItemId: surplus.id,
+          },
+        },
+        create: {
+          organizationId,
+          countId,
+          shortageItemId: shortage.id,
+          surplusItemId: surplus.id,
+          compensatingQuantity: shortage.difference!.abs(),
+          salePriceUsed: shortagePrice.value,
+        },
+        // Nunca pisa un candidato ya revisado (CONFIRMED/REJECTED) -- sólo
+        // asegura que exista, idempotente ante cualquier reintento.
+        update: {},
+      });
+    }
+  }
 }
 
 function canonicalItemsForFingerprint(items: InventoryCountDraftItem[]) {
@@ -348,7 +494,12 @@ export async function submitInventoryCount(
       fastify,
       isBulkFlavorByProduct.get(item.productId) ?? false,
     );
-    const needsRecount = threshold !== null && difference.abs().greaterThan(threshold);
+    const exceedsAbsoluteThreshold = threshold !== null && difference.abs().greaterThan(threshold);
+    const exceedsMandatoryShortage = exceedsMandatoryShortagePercentage(
+      difference,
+      theoreticalQuantity,
+    );
+    const needsRecount = exceedsAbsoluteThreshold || exceedsMandatoryShortage;
     if (needsRecount) anyNeedsRecount = true;
     return { ...item, theoreticalQuantity, difference, needsRecount };
   });
@@ -387,6 +538,15 @@ export async function submitInventoryCount(
         include: countInclude,
       });
 
+      // Etapa 6.2, sección 6 del prompt: sólo se detectan candidatos de
+      // tipeo cuando el conteo queda COMPLETED de una (sin reconteo
+      // pendiente) -- si algún ítem quedó RECOUNT_REQUIRED, las diferencias
+      // todavía no son finales; la detección se repite al completar el
+      // reconteo (ver `submitInventoryRecount`).
+      if (status === 'COMPLETED') {
+        await detectAndPersistTypoCandidates(tx, organizationId, count.id);
+      }
+
       await fastify.audit.logTx(tx, {
         organizationId,
         userId: actor.id,
@@ -398,7 +558,14 @@ export async function submitInventoryCount(
         afterValue: mapCount(count),
       });
 
-      return mapCount(count);
+      const final =
+        status === 'COMPLETED'
+          ? await tx.inventoryCount.findFirstOrThrow({
+              where: { id: count.id, organizationId },
+              include: countInclude,
+            })
+          : count;
+      return mapCount(final);
     });
   } catch (err) {
     if (isUniqueConstraintViolationOn(err, COUNT_IDEMPOTENCY_KEY_TARGET)) {
@@ -541,6 +708,11 @@ export async function submitInventoryRecount(
           },
         });
       }
+
+      // El reconteo siempre deja el conteo COMPLETED (una sola ronda
+      // adicional) -- las diferencias ya son finales, se detectan
+      // candidatos de tipeo acá (sección 6 del prompt de Etapa 6.2).
+      await detectAndPersistTypoCandidates(tx, organizationId, countId);
 
       await fastify.audit.logTx(tx, {
         organizationId,

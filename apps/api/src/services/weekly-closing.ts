@@ -11,11 +11,13 @@ import type {
   WeeklyClosingDetail,
   WeeklyClosingFilters,
   WeeklyClosingItem,
+  WeeklyClosingMissingCostProduct,
 } from '@sistema-grido/shared-types';
 import type { CurrentUser } from '../plugins/auth.js';
 import { ConflictError, InternalError, NotFoundError, ValidationError } from '../errors.js';
 import { assertLocationForMovement } from './inventory-ledger.js';
 import { isUniqueConstraintViolationOn } from './idempotency.js';
+import { resolveEffectivePricesForProducts } from './price-reference-mapping.js';
 
 /**
  * Cierre Semanal del núcleo operativo (Etapa 6) -- ver
@@ -124,17 +126,72 @@ async function loadGoverningCount(
 }
 
 /**
+ * Etapa 6.2, sección 11 del prompt (CONFIRMADO): nunca cerrar una semana
+ * con valuaciones incompletas como si estuvieran completas -- un producto
+ * con stock REAL (`quantityReal != 0`; si es 0 no hay nada que valorizar,
+ * `0 * costo` es 0 sin importar el costo) que no resuelve un
+ * `PriceValue` COST_WITH_TAX vigente (sin mapeo activo, o con mapeo pero
+ * sin ningún valor vigente todavía) bloquea el cierre -- nunca se inventa
+ * costo=0. Recibe el cliente de Prisma como parámetro (nunca
+ * `FastifyInstance`) para poder llamarse tanto fuera de una transacción
+ * (chequeo rápido informativo del checklist) como DENTRO de una (chequeo
+ * AUTORITATIVO de `closeWeeklyClosing`, sección 17: debe ser consistente
+ * incluso si un mapeo se desactiva entre el chequeo rápido y el cierre).
+ */
+async function computeMissingCostProducts(
+  db: Prisma.TransactionClient,
+  organizationId: string,
+  items: Pick<WeeklyClosingItem, 'productId' | 'productName' | 'quantityReal'>[],
+  asOfDate: Date,
+): Promise<WeeklyClosingMissingCostProduct[]> {
+  const valuableItems = items.filter((item) => !new Prisma.Decimal(item.quantityReal).isZero());
+  if (valuableItems.length === 0) return [];
+
+  const resolved = await resolveEffectivePricesForProducts(
+    db,
+    organizationId,
+    valuableItems.map((item) => item.productId),
+    'COST_WITH_TAX',
+    asOfDate,
+  );
+
+  const missing: WeeklyClosingMissingCostProduct[] = [];
+  for (const item of valuableItems) {
+    const entry = resolved.get(item.productId);
+    if (!entry || entry.status === 'NO_MAPPING') {
+      missing.push({
+        productId: item.productId,
+        productName: item.productName,
+        quantityReal: item.quantityReal,
+        reason: 'NO_MAPPING',
+      });
+    } else if (entry.status === 'NO_VIGENT_VALUE') {
+      missing.push({
+        productId: item.productId,
+        productName: item.productName,
+        quantityReal: item.quantityReal,
+        reason: 'NO_VIGENT_VALUE',
+      });
+    }
+  }
+  return missing;
+}
+
+/**
  * Checklist previo al cierre (sección 5 del prompt). `countSubmitted` es la
  * única sub-condición auto-verificada e inequívoca; mermas/gastos/ventas
  * son sólo informativos (nunca bloquean por sí solos, sección 5: "no
  * inventar 'debe haber al menos una merma'"). El bloqueo adicional es el
- * gesto ÚNICO de revisión del ADMIN (`reviewConfirmedById`).
+ * gesto ÚNICO de revisión del ADMIN (`reviewConfirmedById`) y, desde Etapa
+ * 6.2, que no falte ningún costo vigente para el stock real de la semana
+ * (`missingCostProducts`).
  */
 async function computeChecklist(
   fastify: FastifyInstance,
   organizationId: string,
   closing: ClosingRow,
   governing: GoverningCount,
+  liveItems: WeeklyClosingItem[],
 ): Promise<WeeklyClosingChecklist> {
   // Ventana [periodStart, periodStart + 7 días) -- cubre exactamente
   // lunes..domingo del período (`periodEnd` es un DATE a medianoche UTC, así
@@ -186,6 +243,14 @@ async function computeChecklist(
 
   const countSubmitted = governing.count?.status === 'COMPLETED';
   const reviewConfirmed = closing.reviewConfirmedById !== null;
+  // Sólo tiene sentido resolver costos VIGENTES HOY contra una vista previa
+  // (OPEN/REOPENED, con `liveItems` en vivo) -- una revisión CLOSED ya
+  // congeló su valorización para siempre; recalcular acá con precios
+  // actuales sería precisamente el error que la sección 10 prohíbe.
+  const missingCostProducts =
+    closing.status === 'CLOSED'
+      ? []
+      : await computeMissingCostProducts(fastify.db, organizationId, liveItems, new Date());
 
   return {
     countSubmitted,
@@ -199,7 +264,12 @@ async function computeChecklist(
     reviewConfirmedById: closing.reviewConfirmedById,
     reviewConfirmedByName: closing.reviewConfirmedBy?.displayName ?? null,
     reviewConfirmedAt: closing.reviewConfirmedAt?.toISOString() ?? null,
-    canClose: closing.status !== 'CLOSED' && countSubmitted && reviewConfirmed,
+    missingCostProducts,
+    canClose:
+      closing.status !== 'CLOSED' &&
+      countSubmitted &&
+      reviewConfirmed &&
+      missingCostProducts.length === 0,
   };
 }
 
@@ -230,6 +300,14 @@ async function computeLiveItems(
       quantityReal: item.physicalQuantity.toFixed(3),
       difference: item.difference!.toFixed(3),
       countCorrectionMovementId: null,
+      // Valorización (sección 10 del prompt de Etapa 6.2) -- siempre null en
+      // la vista previa EN VIVO: recién se resuelve y CONGELA dentro de la
+      // transacción de `close` (ver `resolveValuationForProducts`), nunca
+      // antes -- así el preview nunca sugiere un número que el cierre real
+      // podría no poder confirmar (ej. si el mapeo se desactiva entretanto).
+      unitCostWithTax: null,
+      totalValue: null,
+      priceValueId: null,
     }));
 }
 
@@ -252,6 +330,9 @@ async function loadPersistedItems(
     quantityReal: row.quantityReal.toFixed(3),
     difference: row.difference.toFixed(3),
     countCorrectionMovementId: row.countCorrectionMovementId,
+    unitCostWithTax: row.unitCostWithTax?.toFixed(2) ?? null,
+    totalValue: row.totalValue?.toFixed(2) ?? null,
+    priceValueId: row.priceValueId,
   }));
 }
 
@@ -379,11 +460,11 @@ export async function getWeeklyClosingDetail(
 ): Promise<WeeklyClosingDetail> {
   const closing = await loadClosingOrThrow(fastify, organizationId, id);
   const governing = await loadGoverningCount(fastify, organizationId, closing);
-  const checklist = await computeChecklist(fastify, organizationId, closing, governing);
   const items =
     closing.status === 'CLOSED'
       ? await loadPersistedItems(fastify, organizationId, closing.id, closing.currentRevision)
       : await computeLiveItems(fastify, organizationId, governing);
+  const checklist = await computeChecklist(fastify, organizationId, closing, governing, items);
 
   return {
     closing: mapClosing(closing),
@@ -430,6 +511,14 @@ async function resolveCloseConflictAfterRace(
  * actualiza el timestamp, no tiene efectos destructivos ni genera
  * duplicados (a diferencia de `close`, que sí es crítica y exige
  * idempotencia estricta -- sección 13 del prompt).
+ *
+ * Etapa 6.2, sección 16 del prompt (auditoría, CRÍTICO): el UPDATE de
+ * estado y su `AuditLog` correspondiente viven en la MISMA transacción
+ * (`audit.logTx`) -- antes de Etapa 6.2 usaban `audit.log` NO
+ * transaccional DESPUÉS del `updateMany`, lo que dejaba una ventana real
+ * donde la revisión podía quedar confirmada sin su auditoría (si el
+ * proceso caía entre ambas líneas) o viceversa. Ninguna operación
+ * sensible puede tener éxito sin su auditoría correspondiente.
  */
 export async function confirmWeeklyClosingReview(
   fastify: FastifyInstance,
@@ -442,25 +531,27 @@ export async function confirmWeeklyClosingReview(
     throw new ConflictError('No se puede confirmar la revisión de un cierre que ya está cerrado.');
   }
 
-  const updateResult = await fastify.db.weeklyClosing.updateMany({
-    where: { id, organizationId, status: { in: ['OPEN', 'REOPENED'] } },
-    data: { reviewConfirmedById: actor.id, reviewConfirmedAt: new Date() },
-  });
-  if (updateResult.count === 0) {
-    throw new ConflictError(
-      'Este cierre ya no admite confirmar la revisión (fue cerrado por otra solicitud); volvé a consultarlo.',
-    );
-  }
+  await fastify.db.$transaction(async (tx) => {
+    const updateResult = await tx.weeklyClosing.updateMany({
+      where: { id, organizationId, status: { in: ['OPEN', 'REOPENED'] } },
+      data: { reviewConfirmedById: actor.id, reviewConfirmedAt: new Date() },
+    });
+    if (updateResult.count === 0) {
+      throw new ConflictError(
+        'Este cierre ya no admite confirmar la revisión (fue cerrado por otra solicitud); volvé a consultarlo.',
+      );
+    }
 
-  await fastify.audit.log({
-    organizationId,
-    userId: actor.id,
-    roleCode: actor.roleCode,
-    locationId: closing.locationId,
-    action: 'WEEKLY_CLOSING_REVIEW_CONFIRMED',
-    module: 'WEEKLY_CLOSING',
-    entityType: 'weekly_closing',
-    entityId: id,
+    await fastify.audit.logTx(tx, {
+      organizationId,
+      userId: actor.id,
+      roleCode: actor.roleCode,
+      locationId: closing.locationId,
+      action: 'WEEKLY_CLOSING_REVIEW_CONFIRMED',
+      module: 'WEEKLY_CLOSING',
+      entityType: 'weekly_closing',
+      entityId: id,
+    });
   });
 
   return getWeeklyClosingDetail(fastify, organizationId, id);
@@ -549,7 +640,12 @@ export async function closeWeeklyClosing(
   }
 
   const governing = await loadGoverningCount(fastify, organizationId, closing);
-  const checklist = await computeChecklist(fastify, organizationId, closing, governing);
+  // Sección 7/9 del prompt: se copian DIRECTAMENTE de `InventoryCountItem`
+  // (vía `computeLiveItems`), nunca se recalculan acá. Seguro leerlos antes
+  // de abrir la transacción -- ver el comentario de esta función sobre por
+  // qué un `InventoryCount` COMPLETED es terminal.
+  const items = await computeLiveItems(fastify, organizationId, governing);
+  const checklist = await computeChecklist(fastify, organizationId, closing, governing, items);
   if (!checklist.canClose) {
     const reasons: string[] = [];
     if (!checklist.countSubmitted) {
@@ -560,14 +656,15 @@ export async function closeWeeklyClosing(
     if (!checklist.reviewConfirmedById) {
       reasons.push('falta la confirmación de revisión del checklist por un ADMIN');
     }
+    if (checklist.missingCostProducts.length > 0) {
+      const names = checklist.missingCostProducts.map((p) => p.productName).join(', ');
+      reasons.push(
+        `falta el costo vigente (C/IVA) de ${checklist.missingCostProducts.length} producto(s) con stock real: ${names}`,
+      );
+    }
     throw new ConflictError(`No se puede cerrar esta semana: ${reasons.join('; ')}.`);
   }
 
-  // Sección 7/9 del prompt: se copian DIRECTAMENTE de `InventoryCountItem`
-  // (vía `computeLiveItems`), nunca se recalculan acá. Seguro leerlos antes
-  // de abrir la transacción -- ver el comentario de esta función sobre por
-  // qué un `InventoryCount` COMPLETED es terminal.
-  const items = await computeLiveItems(fastify, organizationId, governing);
   const productIds = items.map((item) => item.productId);
 
   try {
@@ -608,6 +705,36 @@ export async function closeWeeklyClosing(
         select: { id: true, unitOfMeasureId: true },
       });
       const productById = new Map(products.map((p) => [p.id, p]));
+
+      // Valorización (Etapa 6.2, sección 10/11/17 del prompt): chequeo
+      // AUTORITATIVO -- el de `checklist.missingCostProducts` de arriba es
+      // sólo un adelanto informativo fuera de la transacción; acá, DENTRO
+      // de la misma transacción que decide el cierre, se vuelve a resolver
+      // contra `tx` para que sea consistente incluso si un mapeo se
+      // desactivó o un precio se importó entre el chequeo rápido y este
+      // punto. `asOfDate` se captura UNA sola vez y se usa tanto para el
+      // chequeo como para el valor que efectivamente se congela -- nunca
+      // dos lecturas en instantes distintos que podrían discrepar.
+      const asOfDate = new Date();
+      const missingCostProducts = await computeMissingCostProducts(
+        tx,
+        organizationId,
+        items,
+        asOfDate,
+      );
+      if (missingCostProducts.length > 0) {
+        const names = missingCostProducts.map((p) => p.productName).join(', ');
+        throw new ConflictError(
+          `No se puede cerrar esta semana: falta el costo vigente (C/IVA) de ${missingCostProducts.length} producto(s) con stock real: ${names}.`,
+        );
+      }
+      const costResolution = await resolveEffectivePricesForProducts(
+        tx,
+        organizationId,
+        productIds,
+        'COST_WITH_TAX',
+        asOfDate,
+      );
 
       // Trazabilidad persistida (sección 7 del prompt Etapa 6.1): un mismo
       // `WeeklyClosing` (id constante a través de sus revisiones) sólo
@@ -692,6 +819,22 @@ export async function closeWeeklyClosing(
           correctionsCreated++;
         }
 
+        // Sección 10/11 del prompt: `quantityReal = 0` no requiere costo
+        // (0 * costo es 0 sin importar el costo, `missingCostProducts` ya
+        // excluyó estos productos del chequeo bloqueante) -- se congela
+        // `unitCostWithTax`/`totalValue`/`priceValueId` en null, nunca
+        // costo=0 inventado. Para el resto, `costResolution` YA garantizó
+        // (chequeo de arriba) que exista una entrada `OK`.
+        const quantityRealDecimal = new Prisma.Decimal(item.quantityReal);
+        const resolvedCost = quantityRealDecimal.isZero()
+          ? null
+          : costResolution.get(item.productId);
+        const unitCostWithTax =
+          resolvedCost && resolvedCost.status === 'OK' ? resolvedCost.value : null;
+        const totalValue = unitCostWithTax ? quantityRealDecimal.mul(unitCostWithTax) : null;
+        const priceValueId =
+          resolvedCost && resolvedCost.status === 'OK' ? resolvedCost.priceValueId : null;
+
         await tx.inventorySnapshotItem.create({
           data: {
             organizationId,
@@ -700,9 +843,12 @@ export async function closeWeeklyClosing(
             productId: item.productId,
             revision,
             quantityTheoretical: new Prisma.Decimal(item.quantityTheoretical),
-            quantityReal: new Prisma.Decimal(item.quantityReal),
+            quantityReal: quantityRealDecimal,
             difference: historicalDifference,
             countCorrectionMovementId: countCorrectionMovementId ?? null,
+            unitCostWithTax,
+            totalValue,
+            priceValueId,
           },
         });
       }

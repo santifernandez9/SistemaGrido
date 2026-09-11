@@ -294,18 +294,74 @@ describe('/api/shop', () => {
       expect(item.difference).toBe('-2.000');
     });
 
-    it('sin umbral de reconteo configurado, nunca marca needsRecount aunque la diferencia sea grande', async () => {
-      await loadInitialStock(locationShop, productClosed, '1000');
+    // productClosed es "caja x12" (unitsPerHandlingUnit = 12): tanto
+    // `loadInitialStock` (enteredQuantity en cajas) como `closedUnits` del
+    // conteo se convierten ×12 a cantidad canónica -- estos tests usan
+    // SIEMPRE `closedUnits` (nunca `openUnits`, que no se escala) para que
+    // el porcentaje sea fácil de verificar contra el teórico canónico real.
+
+    it('sin umbral ABSOLUTO configurado, un FALTANTE >=25% del teórico igual dispara needsRecount (regla obligatoria de Etapa 6.2)', async () => {
+      // Etapa 6.2, sección 4 del prompt (CONFIRMADO): el 25% de faltante es
+      // una regla PORCENTUAL obligatoria, independiente de que el umbral
+      // ABSOLUTO opcional (Etapa 4.1) esté configurado o no -- teórico
+      // 10 cajas (120 canónico), real 1 caja (12) -> faltante 108 = 90%.
+      await loadInitialStock(locationShop, productClosed, '10');
       const response = await submitCount(adminAuthHeader, {
         locationId: locationShop,
         weekStart: '2026-09-07',
-        items: [{ productId: productClosed, closedUnits: 0, openUnits: 1 }],
+        items: [{ productId: productClosed, closedUnits: 1 }],
         idempotencyKey: 'conteo-sin-umbral',
+      });
+      expect(response.statusCode).toBe(201);
+      const body = response.json().data;
+      expect(body.items[0].needsRecount).toBe(true);
+      expect(body.status).toBe('RECOUNT_REQUIRED');
+    });
+
+    it('sin umbral ABSOLUTO configurado, un SOBRANTE grande nunca dispara needsRecount (el 25% obligatorio sólo aplica a faltantes)', async () => {
+      // Teórico 1 caja (12 canónico), real 1000 unidades sueltas -> sobrante
+      // enorme (+988); el 25% obligatorio nunca aplica a un sobrante.
+      await loadInitialStock(locationShop, productClosed, '1');
+      const response = await submitCount(adminAuthHeader, {
+        locationId: locationShop,
+        weekStart: '2026-09-07',
+        items: [{ productId: productClosed, closedUnits: 0, openUnits: 1000 }],
+        idempotencyKey: 'conteo-sobrante-sin-umbral',
       });
       expect(response.statusCode).toBe(201);
       const body = response.json().data;
       expect(body.items[0].needsRecount).toBe(false);
       expect(body.status).toBe('COMPLETED');
+    });
+
+    it('sin umbral ABSOLUTO configurado, un FALTANTE menor al 25% del teórico no dispara needsRecount', async () => {
+      // Teórico 10 cajas (120 canónico), real 8 cajas (96) -> faltante 24 = 20% < 25%.
+      await loadInitialStock(locationShop, productClosed, '10');
+      const response = await submitCount(adminAuthHeader, {
+        locationId: locationShop,
+        weekStart: '2026-09-07',
+        items: [{ productId: productClosed, closedUnits: 8 }],
+        idempotencyKey: 'conteo-faltante-chico',
+      });
+      expect(response.statusCode).toBe(201);
+      const body = response.json().data;
+      expect(body.items[0].needsRecount).toBe(false);
+      expect(body.status).toBe('COMPLETED');
+    });
+
+    it('un FALTANTE EXACTAMENTE 25% del teórico dispara needsRecount (umbral inclusive)', async () => {
+      // Teórico 4 cajas (48 canónico), real 3 cajas (36) -> faltante 12 = exactamente 25%.
+      await loadInitialStock(locationShop, productClosed, '4');
+      const response = await submitCount(adminAuthHeader, {
+        locationId: locationShop,
+        weekStart: '2026-09-07',
+        items: [{ productId: productClosed, closedUnits: 3 }],
+        idempotencyKey: 'conteo-faltante-exacto-25',
+      });
+      expect(response.statusCode).toBe(201);
+      const body = response.json().data;
+      expect(body.items[0].needsRecount).toBe(true);
+      expect(body.status).toBe('RECOUNT_REQUIRED');
     });
 
     it('con umbral configurado, una diferencia mayor al umbral marca needsRecount y deja el conteo en RECOUNT_REQUIRED', async () => {

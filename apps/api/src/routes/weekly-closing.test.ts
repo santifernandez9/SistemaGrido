@@ -6,8 +6,14 @@ vi.mock('@supabase/supabase-js', () => createSupabaseMockModule());
 
 const { buildServer } = await import('../server.js');
 const { prisma } = await import('@sistema-grido/db');
-const { resetCoreTables, seedOrganization, seedRoles, seedProductTypes, seedUnitsOfMeasure } =
-  await import('../test/db-helpers.js');
+const {
+  resetCoreTables,
+  seedOrganization,
+  seedRoles,
+  seedProductTypes,
+  seedUnitsOfMeasure,
+  seedProductCost,
+} = await import('../test/db-helpers.js');
 const { closeWeeklyClosing } = await import('../services/weekly-closing.js');
 
 /**
@@ -132,6 +138,27 @@ describe('/api/weekly-closings', () => {
 
     asAdmin();
 
+    // Etapa 6.2, sección 11 del prompt: cerrar exige costo C/IVA vigente
+    // para todo producto con stock REAL != 0 -- productA/B/C sí tienen
+    // stock real en el conteo gobernante (ver `submitGoverningCount`),
+    // productD queda en 0 (no lo necesita). El importador/mapeo real de
+    // precios se prueba aparte, en price-list.test.ts -- acá sólo se
+    // necesita que el costo EXISTA para no desviar el foco de estos tests
+    // (herencia de Etapa 6/6.1) hacia la valorización.
+    for (const [productId, productName] of [
+      [productA, 'Producto A'],
+      [productB, 'Producto B'],
+      [productC, 'Producto C'],
+    ] as const) {
+      await seedProductCost({
+        organizationId,
+        productId,
+        productName,
+        actorId: adminUserId,
+        costWithTax: '100.00',
+      });
+    }
+
     // Stock teórico inicial: A=10, B=8, C=4, D=-3 (ajuste negativo, sección
     // I -- "stock teórico negativo permitido").
     await app.inject({
@@ -190,6 +217,36 @@ describe('/api/weekly-closings', () => {
     });
   }
 
+  /**
+   * Etapa 6.2, sección 4 del prompt: envía el conteo gobernante y, si algún
+   * ítem queda `RECOUNT_REQUIRED` (productB dispara la regla porcentual
+   * obligatoria de faltante >=25%, ver comentario de `readyToClose`),
+   * reenvía el MISMO valor físico como reconteo para que el conteo llegue
+   * a COMPLETED sin alterar ninguna diferencia esperada por los tests.
+   */
+  async function submitGoverningCountAndComplete() {
+    const countResponse = await submitGoverningCount();
+    expect(countResponse.statusCode).toBe(201);
+    const countBody = countResponse.json().data;
+    if (countBody.status === 'RECOUNT_REQUIRED') {
+      const flaggedItems = countBody.items.filter((i: { needsRecount: boolean }) => i.needsRecount);
+      const recountResponse = await app.inject({
+        method: 'POST',
+        url: `/api/shop/counts/${countBody.id}/recount`,
+        headers: adminAuthHeader,
+        payload: {
+          items: flaggedItems.map((i: { productId: string; closedUnits: number | null }) => ({
+            productId: i.productId,
+            closedUnits: i.closedUnits,
+          })),
+          idempotencyKey: `reconteo-${countBody.id}`,
+        },
+      });
+      expect(recountResponse.statusCode).toBe(200);
+    }
+    return countResponse;
+  }
+
   async function prepareClosing(headers: Record<string, string> = adminAuthHeader) {
     return app.inject({
       method: 'POST',
@@ -237,13 +294,13 @@ describe('/api/weekly-closings', () => {
     });
   }
 
-  /** Prepara + envía el conteo gobernante + confirma revisión -- deja el
-   * cierre listo para `close` (`canClose === true`). */
+  /** Prepara + envía el conteo gobernante (con reconteo automático si hace
+   * falta, ver `submitGoverningCountAndComplete`) + confirma revisión --
+   * deja el cierre listo para `close` (`canClose === true`). */
   async function readyToClose() {
     const prepared = await prepareClosing();
     const id = prepared.json().data.id as string;
-    const countResponse = await submitGoverningCount();
-    expect(countResponse.statusCode).toBe(201);
+    await submitGoverningCountAndComplete();
     await confirmReview(id);
     return id;
   }
@@ -311,7 +368,7 @@ describe('/api/weekly-closings', () => {
     it('countSubmitted pasa a true tras enviar el conteo de la semana siguiente (periodStart + 7)', async () => {
       const prepared = await prepareClosing();
       const id = prepared.json().data.id as string;
-      await submitGoverningCount();
+      await submitGoverningCountAndComplete();
       const detail = await getDetail(id);
       expect(detail.json().data.checklist.countSubmitted).toBe(true);
       expect(detail.json().data.checklist.governingCountStatus).toBe('COMPLETED');
@@ -320,7 +377,7 @@ describe('/api/weekly-closings', () => {
     it('canClose sigue false sin la confirmación de revisión de un ADMIN, aun con el conteo completo', async () => {
       const prepared = await prepareClosing();
       const id = prepared.json().data.id as string;
-      await submitGoverningCount();
+      await submitGoverningCountAndComplete();
       const detail = await getDetail(id);
       expect(detail.json().data.checklist.countSubmitted).toBe(true);
       expect(detail.json().data.checklist.reviewConfirmedById).toBeNull();

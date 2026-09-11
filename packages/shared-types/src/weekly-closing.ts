@@ -20,6 +20,7 @@ export const WEEKLY_CLOSING_AUDIT_ACTIONS = [
   'WEEKLY_CLOSING_CLOSED',
   'WEEKLY_CLOSING_CLOSE_REJECTED',
   'WEEKLY_CLOSING_REOPENED',
+  'GENERAL_WEEKLY_CLOSING_CLOSED',
 ] as const;
 export type WeeklyClosingAuditAction = (typeof WEEKLY_CLOSING_AUDIT_ACTIONS)[number];
 
@@ -88,7 +89,10 @@ export interface WeeklyClosingChecklist {
   reviewConfirmedById: string | null;
   reviewConfirmedByName: string | null;
   reviewConfirmedAt: string | null;
-  /** = countSubmitted && reviewConfirmedById !== null && status !== 'CLOSED'. */
+  /** Etapa 6.2, sección 11 del prompt -- productos con stock real sin costo
+   * COST_WITH_TAX vigente resoluble. No vacío bloquea el cierre. */
+  missingCostProducts: WeeklyClosingMissingCostProduct[];
+  /** = countSubmitted && reviewConfirmedById !== null && missingCostProducts.length === 0 && status !== 'CLOSED'. */
   canClose: boolean;
 }
 
@@ -115,6 +119,26 @@ export interface WeeklyClosingItem {
    * CLOSED) cuando `difference` era '0' -- nunca se genera un ajuste sin
    * diferencia real (sección 8 del prompt). */
   countCorrectionMovementId: string | null;
+  /** Valorización (Etapa 6.2, sección 10 del prompt) -- costo unitario CON
+   * IVA vigente y valor total, congelados al momento del `close` (nunca
+   * recalculados por un import de precios posterior). `null` mientras no
+   * está CLOSED (vista previa) o cuando el producto no requirió valuación
+   * (`quantityReal = '0'`). */
+  unitCostWithTax: string | null;
+  totalValue: string | null;
+  priceValueId: string | null;
+}
+
+/** Un producto con stock real (Etapa 6.2, sección 11 del prompt) sin costo
+ * COST_WITH_TAX vigente resoluble -- bloquea el cierre hasta que un ADMIN
+ * resuelva el mapeo o importe el costo faltante. Nunca se inventa costo=0. */
+export interface WeeklyClosingMissingCostProduct {
+  productId: string;
+  productName: string;
+  quantityReal: string;
+  /** Motivo específico: sin mapeo activo a ninguna PriceReference
+   * COST_WITH_TAX, o con mapeo pero sin ningún PriceValue vigente todavía. */
+  reason: 'NO_MAPPING' | 'NO_VIGENT_VALUE';
 }
 
 /**
@@ -157,4 +181,44 @@ export interface ReopenWeeklyClosingInput {
 export interface WeeklyClosingFilters {
   locationId?: string;
   status?: WeeklyClosingStatus;
+}
+
+// ---------------------------------------------------------------------------
+// Cierre semanal GENERAL (Etapa 6.2, sección 12 del prompt, CONFIRMADO: "la
+// semana cierra cuando TODAS las heladerías requeridas terminaron su
+// conteo"). No reemplaza los `WeeklyClosing` por ubicación de arriba --
+// agrega la vista/estado a NIVEL SEMANA.
+
+export const GENERAL_WEEKLY_CLOSING_STATUSES = ['OPEN', 'CLOSED'] as const;
+export type GeneralWeeklyClosingStatus = (typeof GENERAL_WEEKLY_CLOSING_STATUSES)[number];
+
+/** Estado de una heladería REQUERIDA (`Location.active && type ===
+ * 'ICE_CREAM_SHOP'`, nunca una lista hardcodeada) dentro del cierre general. */
+export interface GeneralWeeklyClosingLocationStatus {
+  locationId: string;
+  locationName: string;
+  weeklyClosingId: string | null;
+  weeklyClosingStatus: WeeklyClosingStatus | null;
+  /** true sólo cuando su `WeeklyClosing` está CLOSED -- REOPENED cuenta como
+   * "no lista" hasta que se vuelva a cerrar. */
+  ready: boolean;
+}
+
+export interface GeneralWeeklyClosing {
+  id: string | null;
+  organizationId: string;
+  /** Fecha ISO (YYYY-MM-DD), lunes. */
+  periodStart: string;
+  periodEnd: string;
+  status: GeneralWeeklyClosingStatus;
+  closedById: string | null;
+  closedByName: string | null;
+  closedAt: string | null;
+  locations: GeneralWeeklyClosingLocationStatus[];
+  /** = todas las `locations` con `ready === true`. */
+  canClose: boolean;
+}
+
+export interface CloseGeneralWeeklyClosingInput {
+  idempotencyKey: string;
 }

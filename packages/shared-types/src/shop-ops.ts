@@ -34,6 +34,19 @@ export const STOCKOUT_CLASSIFICATIONS = ['URGENT_RESTOCK', 'SUPPLY_SHORTAGE'] as
 export type StockoutClassification = (typeof STOCKOUT_CLASSIFICATIONS)[number];
 
 /**
+ * Resolución explícita de una diferencia de conteo (Etapa 6.2, secciones 4/5
+ * del prompt, CONFIRMADO). Un FALTANTE recontado y confirmado pasa a
+ * `SHORTAGE_CONFIRMED` ("FALTANTE CONFIRMADO" -- el primer conteo nunca se
+ * sobrescribe). Un SOBRANTE nunca se acepta en silencio: requiere este mismo
+ * gesto explícito (`SURPLUS_RESOLVED`) antes de darse por resuelto.
+ */
+export const DIFFERENCE_RESOLUTION_KINDS = ['SHORTAGE_CONFIRMED', 'SURPLUS_RESOLVED'] as const;
+export type DifferenceResolutionKind = (typeof DIFFERENCE_RESOLUTION_KINDS)[number];
+
+export const TYPO_CANDIDATE_STATUSES = ['PENDING', 'CONFIRMED', 'REJECTED'] as const;
+export type TypoCandidateStatus = (typeof TYPO_CANDIDATE_STATUSES)[number];
+
+/**
  * Línea de un ítem cargado durante el conteo (todavía SIN enviar). Vive
  * enteramente en el dispositivo (IndexedDB, sección 2 del prompt) hasta el
  * envío -- este tipo describe el borrador local, no lo que persiste el
@@ -93,6 +106,58 @@ export interface InventoryCountItemResult {
   difference: string | null;
   needsRecount: boolean;
   recounted: boolean;
+  /** Etapa 6.2 -- null mientras la diferencia (si la hay) sigue pendiente
+   * de revisión. */
+  differenceResolution: DifferenceResolutionKind | null;
+  differenceResolvedById: string | null;
+  differenceResolvedByName: string | null;
+  differenceResolvedAt: string | null;
+  differenceResolutionNote: string | null;
+}
+
+/** Body de `POST /api/inventory-counts/:countId/items/:itemId/resolve-difference`
+ * (Etapa 6.2, secciones 4/5 del prompt). `kind` debe ser consistente con el
+ * signo de la diferencia del ítem (SHORTAGE_CONFIRMED sólo para faltantes,
+ * SURPLUS_RESOLVED sólo para sobrantes) -- el backend lo valida, nunca lo
+ * infiere el cliente. */
+export interface ResolveInventoryDifferenceInput {
+  kind: DifferenceResolutionKind;
+  note?: string;
+}
+
+/**
+ * Posible error de tipeo entre dos productos del mismo conteo (Etapa 6.2,
+ * sección 6 del prompt) -- SUGERENCIA calculada, nunca aplicada
+ * automáticamente. Ver el modelo `InventoryCountTypoCandidate` del schema.
+ */
+export interface InventoryCountTypoCandidate {
+  id: string;
+  countId: string;
+  shortageItemId: string;
+  shortageProductId: string;
+  shortageProductName: string;
+  surplusItemId: string;
+  surplusProductId: string;
+  surplusProductName: string;
+  /** String decimal -- magnitud en la que ambas diferencias se compensan. */
+  compensatingQuantity: string;
+  /** String decimal -- precio de VENTA compartido usado como evidencia. */
+  salePriceUsed: string;
+  status: TypoCandidateStatus;
+  resolvedById: string | null;
+  resolvedByName: string | null;
+  resolvedAt: string | null;
+  resolutionNote: string | null;
+  createdAt: string;
+}
+
+/** Body de `POST /api/inventory-counts/:countId/typo-candidates/:id/resolve`. */
+export interface ResolveTypoCandidateInput {
+  /** CONFIRMED: un ADMIN valida que efectivamente fue un error de tipeo
+   * (queda documentado -- nunca modifica `Sale`/`InventoryMovement`
+   * automáticamente). REJECTED: un ADMIN descarta la sugerencia. */
+  status: 'CONFIRMED' | 'REJECTED';
+  note?: string;
 }
 
 export interface InventoryCount {
@@ -108,6 +173,9 @@ export interface InventoryCount {
   createdById: string;
   createdByName: string;
   items: InventoryCountItemResult[];
+  /** Etapa 6.2 -- posibles errores de tipeo detectados entre ítems de este
+   * mismo conteo (sección 6 del prompt), incluidos ya resueltos/rechazados. */
+  typoCandidates: InventoryCountTypoCandidate[];
 }
 
 export interface InventoryCountFilters {

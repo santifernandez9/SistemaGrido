@@ -5,6 +5,7 @@ import {
   MONEY_AMOUNT_PATTERN,
   OPEN_CONTAINER_FRACTIONS,
   INVENTORY_COUNT_STATUSES,
+  DIFFERENCE_RESOLUTION_KINDS,
 } from '@sistema-grido/shared-types';
 import type {
   ApiSuccess,
@@ -13,8 +14,11 @@ import type {
   CreateVariableExpenseInput,
   CreateWasteInput,
   InventoryCount,
+  InventoryCountTypoCandidate,
   InventoryMovement,
   Page,
+  ResolveInventoryDifferenceInput,
+  ResolveTypoCandidateInput,
   StockoutEvent,
   SubmitInventoryCountInput,
   SubmitInventoryRecountInput,
@@ -30,6 +34,10 @@ import {
   submitInventoryCount,
   submitInventoryRecount,
 } from '../services/inventory-count.js';
+import {
+  resolveInventoryDifference,
+  resolveTypoCandidate,
+} from '../services/inventory-count-resolution.js';
 import { createVariableExpense, listVariableExpenses } from '../services/variable-expense.js';
 import { createStockoutEvent, listStockoutEvents } from '../services/stockout.js';
 
@@ -175,6 +183,19 @@ const closeContainerSchema = z.object({
   idempotencyKey: z.string().min(1),
 });
 
+const itemParamsSchema = z.object({ id: z.string().uuid(), itemId: z.string().uuid() });
+const candidateParamsSchema = z.object({ id: z.string().uuid(), candidateId: z.string().uuid() });
+
+const resolveDifferenceSchema = z.object({
+  kind: z.enum(DIFFERENCE_RESOLUTION_KINDS),
+  note: z.string().trim().min(1).optional(),
+});
+
+const resolveTypoCandidateSchema = z.object({
+  status: z.enum(['CONFIRMED', 'REJECTED']),
+  note: z.string().trim().min(1).optional(),
+});
+
 export default async function shopOpsRoutes(fastify: FastifyInstance): Promise<void> {
   // --- Conteo ---------------------------------------------------------------
 
@@ -255,6 +276,56 @@ export default async function shopOpsRoutes(fastify: FastifyInstance): Promise<v
         await requireLocationAccess(count.locationId)(request, undefined as never);
       }
       const body: ApiSuccess<InventoryCount> = { ok: true, data: count };
+      return body;
+    },
+  );
+
+  // Etapa 6.2, secciones 4/5: resolución explícita de faltante/sobrante --
+  // operación sensible de revisión, restringida a ADMIN (mismo criterio que
+  // el resto de las confirmaciones/revisiones de Etapa 5/6).
+  fastify.post(
+    '/api/shop/counts/:id/items/:itemId/resolve-difference',
+    { preHandler: [fastify.authenticate, requireRole('ADMIN')] },
+    async (request) => {
+      const params = itemParamsSchema.parse(request.params);
+      const input = resolveDifferenceSchema.parse(request.body) as ResolveInventoryDifferenceInput;
+      const actor = request.currentUser!;
+      const body: ApiSuccess<InventoryCount> = {
+        ok: true,
+        data: await resolveInventoryDifference(
+          fastify,
+          actor.organizationId,
+          actor,
+          params.id,
+          params.itemId,
+          input,
+        ),
+      };
+      return body;
+    },
+  );
+
+  // Etapa 6.2, sección 6: confirmar/rechazar una sugerencia de posible
+  // error de tipeo -- nunca modifica Sale/InventoryMovement, sólo
+  // documenta la revisión.
+  fastify.post(
+    '/api/shop/counts/:id/typo-candidates/:candidateId/resolve',
+    { preHandler: [fastify.authenticate, requireRole('ADMIN')] },
+    async (request) => {
+      const params = candidateParamsSchema.parse(request.params);
+      const input = resolveTypoCandidateSchema.parse(request.body) as ResolveTypoCandidateInput;
+      const actor = request.currentUser!;
+      const body: ApiSuccess<InventoryCountTypoCandidate> = {
+        ok: true,
+        data: await resolveTypoCandidate(
+          fastify,
+          actor.organizationId,
+          actor,
+          params.id,
+          params.candidateId,
+          input,
+        ),
+      };
       return body;
     },
   );
