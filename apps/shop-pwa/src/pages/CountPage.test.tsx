@@ -222,6 +222,11 @@ describe('CountPage (shop-pwa)', () => {
           difference: '-488.000',
           needsRecount: true,
           recounted: false,
+          differenceResolution: null,
+          differenceResolvedById: null,
+          differenceResolvedByName: null,
+          differenceResolvedAt: null,
+          differenceResolutionNote: null,
         },
         {
           id: 'item2',
@@ -236,6 +241,11 @@ describe('CountPage (shop-pwa)', () => {
           difference: '0.000',
           needsRecount: false,
           recounted: false,
+          differenceResolution: null,
+          differenceResolvedById: null,
+          differenceResolvedByName: null,
+          differenceResolvedAt: null,
+          differenceResolutionNote: null,
         },
       ],
     } satisfies Partial<InventoryCount>);
