@@ -41,6 +41,7 @@ const COUNT_PAGE: Page<InventoryCount> = {
           closedUnits: 1,
           openUnits: null,
           openFraction: null,
+          depositoClosedUnits: null,
           physicalQuantity: '1.000',
           theoreticalQuantity: '25.000',
           difference: '-24.000',

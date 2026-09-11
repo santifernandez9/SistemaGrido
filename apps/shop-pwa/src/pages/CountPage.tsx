@@ -391,7 +391,9 @@ function QuantityFields({
   onChange: (patch: Partial<InventoryCountDraftItem>) => void;
 }) {
   const openUnits = item?.openUnits ?? undefined;
-  const closedLabel = isFlavor ? `Salón - cerrada (${unitOfMeasureName})` : `Cerrados (${unitOfMeasureName})`;
+  const closedLabel = isFlavor
+    ? `Salón - cerrada (${unitOfMeasureName})`
+    : `Cerrados (${unitOfMeasureName})`;
   const openLabel = isFlavor ? 'Salón - abierta' : 'Sueltos';
 
   return (

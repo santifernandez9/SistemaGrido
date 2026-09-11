@@ -3,7 +3,12 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import type { ReactNode } from 'react';
-import type { InventoryCount, InventoryCountItemResult, Product, UserProfile } from '@sistema-grido/shared-types';
+import type {
+  InventoryCount,
+  InventoryCountItemResult,
+  Product,
+  UserProfile,
+} from '@sistema-grido/shared-types';
 import { IDBFactory } from 'fake-indexeddb';
 
 const apiGet = vi.fn();
