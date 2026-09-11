@@ -14,7 +14,8 @@ const {
   seedUnitsOfMeasure,
   seedProductCost,
 } = await import('../test/db-helpers.js');
-const { closeWeeklyClosing } = await import('../services/weekly-closing.js');
+const { closeWeeklyClosing, confirmWeeklyClosingReview } =
+  await import('../services/weekly-closing.js');
 
 /**
  * Tests del Cierre Semanal del núcleo operativo (Etapa 6) -- ver
@@ -1171,6 +1172,201 @@ describe('/api/weekly-closings', () => {
         .data.items.find((i: { productId: string }) => i.productId === productA);
       expect(after.unitCostWithTax).toBe('100.00'); // sin cambios
       expect(after.totalValue).toBe('1200.00'); // sin cambios
+    });
+
+    /**
+     * Etapa 6.2.1, sección 9 del prompt: importa un `PriceValue` nuevo para
+     * la MISMA `PriceReference` de productA ("Producto A", creada por
+     * `seedProductCost` en el `beforeEach`) con la `effectiveFrom` indicada
+     * -- mismo patrón que el test de arriba, parametrizado para reutilizarse
+     * en los 3 casos A/C/D de abajo.
+     */
+    async function importCostForProductA(value: string, effectiveFromIso: string) {
+      const reference = await prisma.priceReference.findFirstOrThrow({
+        where: { organizationId, priceType: 'COST_WITH_TAX', label: 'Producto A' },
+      });
+      const imp = await prisma.priceListImport.create({
+        data: {
+          organizationId,
+          source: 'HELACOR_COST_LIST',
+          priceType: 'COST_WITH_TAX',
+          originalFilename: `costo-${effectiveFromIso}.xlsx`,
+          fileHash: `hash-costo-${effectiveFromIso}-${value}`,
+          status: 'CONFIRMED',
+          totalRows: 1,
+          validRows: 1,
+          createdById: adminUserId,
+          confirmedById: adminUserId,
+          confirmedAt: new Date(),
+          effectiveFrom: new Date(`${effectiveFromIso}T00:00:00.000Z`),
+          rows: {
+            create: [
+              { rowNumber: 1, rawLabel: 'Producto A', rawValueWithTax: value, status: 'VALID' },
+            ],
+          },
+        },
+        include: { rows: true },
+      });
+      await prisma.priceValue.create({
+        data: {
+          organizationId,
+          priceReferenceId: reference.id,
+          priceType: 'COST_WITH_TAX',
+          value,
+          effectiveFrom: new Date(`${effectiveFromIso}T00:00:00.000Z`),
+          priceListImportId: imp.id,
+          priceListImportRowId: imp.rows[0]!.id,
+          createdById: adminUserId,
+        },
+      });
+    }
+
+    it('TEST A/B/D -- un costo que entra en vigencia el día POSTERIOR al periodEnd (2026-09-07, el lunes siguiente) NUNCA se usa al cerrar, sin importar cuándo el ADMIN haga clic en cerrar', async () => {
+      const id = await readyToClose();
+      // Importado ANTES de cerrar (a diferencia del test anterior, que lo
+      // importa después) -- el punto es que YA está en la base de datos al
+      // momento del `close`, y aun así no debe usarse: `effectiveFrom`
+      // (2026-09-07) es un día POSTERIOR al `periodEnd` (2026-09-06) de
+      // este cierre, sin importar que sea muy anterior a "hoy" (la fecha
+      // real del sistema, muy posterior a 2026).
+      await importCostForProductA('1200.00', GOVERNING_WEEK_START); // 2026-09-07
+
+      const closeRes = await closeClosing(id, 'cierre-periodend-a');
+      expect(closeRes.statusCode).toBe(200);
+      const item = closeRes
+        .json()
+        .data.items.find((i: { productId: string }) => i.productId === productA);
+      // Sigue siendo el costo original ($100, sembrado por seedProductCost
+      // con effectiveFrom 2020-01-01) -- NUNCA el $1.200 importado, aunque
+      // ya exista en la base al momento de cerrar.
+      expect(item.unitCostWithTax).toBe('100.00');
+      expect(item.totalValue).toBe('1200.00'); // 12 * 100.00
+    });
+
+    it('TEST C -- un costo que entra en vigencia DENTRO de la semana cerrada (2026-09-03, miércoles) SÍ se usa al cerrar', async () => {
+      const id = await readyToClose();
+      await importCostForProductA('150.00', '2026-09-03'); // dentro de 08-31..09-06
+
+      const closeRes = await closeClosing(id, 'cierre-periodend-c');
+      expect(closeRes.statusCode).toBe(200);
+      const item = closeRes
+        .json()
+        .data.items.find((i: { productId: string }) => i.productId === productA);
+      expect(item.unitCostWithTax).toBe('150.00'); // el vigente al periodEnd, no el original
+      expect(item.totalValue).toBe('1800.00'); // 12 * 150.00
+    });
+
+    it('TEST E -- reabrir y recerrar usa el MISMO costo histórico del período, aunque entretanto se importe un costo con vigencia posterior al periodEnd', async () => {
+      const id = await readyToClose();
+      const firstClose = await closeClosing(id, 'cierre-periodend-e-1');
+      expect(firstClose.statusCode).toBe(200);
+      const firstItem = firstClose
+        .json()
+        .data.items.find((i: { productId: string }) => i.productId === productA);
+      expect(firstItem.unitCostWithTax).toBe('100.00');
+
+      // Motivo de reapertura + un costo nuevo importado ENTRE la reapertura
+      // y el recierre, con vigencia posterior al periodEnd -- no debería
+      // poder "colarse" en la segunda revisión tampoco.
+      const reopenRes = await reopenClosing(id, 'Corrección de prueba (Etapa 6.2.1, TEST E)');
+      expect(reopenRes.statusCode).toBe(200);
+      await importCostForProductA('9999.00', '2026-09-08');
+      await confirmReview(id);
+
+      const secondClose = await closeClosing(id, 'cierre-periodend-e-2');
+      expect(secondClose.statusCode).toBe(200);
+      const secondItem = secondClose
+        .json()
+        .data.items.find((i: { productId: string }) => i.productId === productA);
+      expect(secondItem.unitCostWithTax).toBe('100.00'); // idéntico a la primera revisión
+      expect(secondItem.totalValue).toBe('1200.00');
+    });
+  });
+
+  describe('Etapa 6.2.1 -- atomicidad de la auditoría de confirmWeeklyClosingReview', () => {
+    it('si falla el INSERT de auditoría dentro de la transacción, el cambio de estado también hace rollback (nunca queda confirmado sin su auditoría)', async () => {
+      const prepared = await prepareClosing();
+      const id = prepared.json().data.id as string;
+
+      // Fastify "roto" a propósito, mismo patrón que el TEST C de
+      // `closeWeeklyClosing` (arriba): SÓLO intercepta `tx.auditLog.create`
+      // para forzar que la escritura de auditoría falle DENTRO de la
+      // transacción -- todo lo demás (el propio `updateMany`, el resto de
+      // Prisma) sigue siendo real Postgres, para que la aserción demuestre
+      // atomicidad OBSERVABLE (el UPDATE de estado no persiste), no sólo
+      // que `logTx` fue invocado.
+      const brokenDb = new Proxy(prisma, {
+        get(target, prop, receiver) {
+          if (prop === '$transaction') {
+            return (callback: (tx: unknown) => unknown, options?: unknown) =>
+              (target.$transaction as (cb: (tx: unknown) => unknown, opts?: unknown) => unknown)(
+                (tx: Record<string, unknown>) => {
+                  const brokenTx = new Proxy(tx, {
+                    get(txTarget, txProp, txReceiver) {
+                      if (txProp === 'auditLog') {
+                        const auditDelegate = txTarget.auditLog as Record<string, unknown>;
+                        return new Proxy(auditDelegate, {
+                          get(auditTarget, auditProp) {
+                            if (auditProp === 'create') {
+                              return async () => {
+                                throw new Error('Fallo forzado de auditoría (test de atomicidad)');
+                              };
+                            }
+                            return Reflect.get(auditTarget, auditProp);
+                          },
+                        });
+                      }
+                      return Reflect.get(txTarget, txProp, txReceiver);
+                    },
+                  });
+                  return callback(brokenTx);
+                },
+                options,
+              );
+          }
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+      const brokenFastify = new Proxy(app, {
+        get(target, prop, receiver) {
+          if (prop === 'db') return brokenDb;
+          return Reflect.get(target, prop, receiver);
+        },
+      }) as unknown as FastifyInstance;
+
+      const admin = await prisma.appUser.findFirstOrThrow({ where: { id: adminUserId } });
+      const actor = {
+        id: admin.id,
+        organizationId,
+        roleCode: 'ADMIN' as const,
+        defaultLocationId: admin.defaultLocationId,
+        displayName: admin.displayName,
+        email: admin.email,
+      };
+
+      await expect(
+        confirmWeeklyClosingReview(brokenFastify, organizationId, actor, id),
+      ).rejects.toThrow('Fallo forzado de auditoría');
+
+      // Rollback completo, verificado contra el cliente REAL de Prisma (no
+      // el roto): el UPDATE de `reviewConfirmedById`/`reviewConfirmedAt`
+      // NUNCA se hizo efectivo, aunque la promesa del `updateMany` en sí
+      // misma no lanzó ningún error -- lo que prueba que ambas escrituras
+      // comparten la misma transacción, no sólo que se llaman en secuencia.
+      const closing = await prisma.weeklyClosing.findUniqueOrThrow({ where: { id } });
+      expect(closing.reviewConfirmedById).toBeNull();
+      expect(closing.reviewConfirmedAt).toBeNull();
+      const auditCount = await prisma.auditLog.count({
+        where: { entityId: id, action: 'WEEKLY_CLOSING_REVIEW_CONFIRMED' },
+      });
+      expect(auditCount).toBe(0);
+
+      // El cierre sigue siendo operable normalmente después (no quedó en un
+      // estado intermedio corrupto): con el `db` real la confirmación
+      // funciona bien.
+      const realConfirm = await confirmReview(id);
+      expect(realConfirm.statusCode).toBe(200);
+      expect(realConfirm.json().data.checklist.reviewConfirmedById).toBe(adminUserId);
     });
   });
 });

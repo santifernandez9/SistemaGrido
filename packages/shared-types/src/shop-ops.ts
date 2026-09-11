@@ -55,14 +55,30 @@ export type TypoCandidateStatus = (typeof TYPO_CANDIDATE_STATUSES)[number];
  * Los dos modos de captura (sección 3/4 del prompt) comparten los mismos
  * tres campos: para un producto CERRADO, `closedUnits` = cajas cerradas,
  * `openUnits` = unidades sueltas (conteo exacto), `openFraction` siempre
- * ausente; para un SABOR a granel, `closedUnits` = latas cerradas,
- * `openUnits` = latas abiertas, `openFraction` estimada cuando `openUnits > 0`.
+ * ausente; para un SABOR a granel, `closedUnits` = latas cerradas
+ * (equivalente a "Salón - cerrada" en la planilla física real), `openUnits`
+ * = latas abiertas ("Salón - abierta"), `openFraction` estimada cuando
+ * `openUnits > 0`.
+ *
+ * `depositoClosedUnits` (Etapa 6.2.1, secciones 2/3/4 del prompt,
+ * CONFIRMADO por las planillas físicas reales): sólo aplica a productos
+ * SABOR (`Product.flavorId` no nulo) -- la existencia de latas CERRADAS que
+ * la planilla real registra en una columna separada "Depósito", distinta de
+ * "Salón". Es aditivo al modelo existente, no un modelo paralelo: contribuye
+ * a `physicalQuantity` con el MISMO mecanismo que `closedUnits` (mismo
+ * `Product.unitsPerHandlingUnit`, ninguna fracción nueva) -- la separación
+ * es sólo para trazabilidad/auditoría fiel a la planilla real, ya que ambas
+ * cantidades están físicamente en la misma `Location` (la heladería) y se
+ * valorizan/reconcilian juntas contra el mismo teórico. Ver
+ * docs/ETAPA-6.2.1-CORRECCIONES-HITO1.md, sección "Sabores: Salón/Depósito"
+ * para la decisión completa.
  */
 export interface InventoryCountDraftItem {
   productId: string;
   closedUnits?: number;
   openUnits?: number;
   openFraction?: OpenContainerFraction;
+  depositoClosedUnits?: number;
 }
 
 /**
@@ -100,6 +116,9 @@ export interface InventoryCountItemResult {
   closedUnits: number | null;
   openUnits: number | null;
   openFraction: OpenContainerFraction | null;
+  /** Etapa 6.2.1 -- existencia de latas cerradas en el depósito propio de la
+   * heladería, sólo para sabores. Ver `InventoryCountDraftItem`. */
+  depositoClosedUnits: number | null;
   /** String decimal (mismo criterio que `InventoryMovement.quantity`, Etapa 3.1). */
   physicalQuantity: string;
   theoreticalQuantity: string | null;

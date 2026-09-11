@@ -793,6 +793,21 @@ model InventoryCountItem {
   closedUnits  Int?                   @map("closed_units")
   openUnits    Int?                   @map("open_units")
   openFraction OpenContainerFraction? @map("open_fraction")
+  /// Etapa 6.2.1, secciones 2/3/4 del prompt (CONFIRMADO por las planillas
+  /// físicas reales del cliente): sólo se usa en productos SABOR
+  /// (`Product.flavorId` no nulo), donde la planilla real distingue una
+  /// columna "Salón" (`closedUnits`/`openUnits`/`openFraction`, ya
+  /// existentes desde Etapa 4) de una columna "Depósito" -- existencia de
+  /// latas CERRADAS guardadas en el depósito/cámara PROPIO de esa misma
+  /// heladería (una `Location` ICE_CREAM_SHOP, no una `Location` DEPOT
+  /// separada). Aditivo al modelo existente, nunca un segundo modelo
+  /// paralelo de inventario: contribuye a `physicalQuantity` con el MISMO
+  /// mecanismo que `closedUnits` (mismo `unitsPerHandlingUnit`, sin
+  /// fracciones nuevas) -- la columna separada es sólo para trazabilidad
+  /// fiel a la planilla real, ya que ambas cantidades están físicamente en
+  /// la misma ubicación y se valorizan/reconcilian juntas contra el mismo
+  /// teórico. CHECK >= 0 agregado a mano en la migración.
+  depositoClosedUnits Int? @map("deposito_closed_units")
 
   /// Cantidad física, normalizada a la unidad canónica del producto (mismo
   /// concepto que `InventoryMovement.quantity`) -- calculada UNA VEZ por el

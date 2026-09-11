@@ -243,14 +243,20 @@ async function computeChecklist(
 
   const countSubmitted = governing.count?.status === 'COMPLETED';
   const reviewConfirmed = closing.reviewConfirmedById !== null;
-  // Sólo tiene sentido resolver costos VIGENTES HOY contra una vista previa
-  // (OPEN/REOPENED, con `liveItems` en vivo) -- una revisión CLOSED ya
-  // congeló su valorización para siempre; recalcular acá con precios
-  // actuales sería precisamente el error que la sección 10 prohíbe.
+  // Sólo tiene sentido resolver costos contra una vista previa (OPEN/
+  // REOPENED, con `liveItems` en vivo) -- una revisión CLOSED ya congeló su
+  // valorización para siempre; recalcular acá sería precisamente el error
+  // que la sección 10 prohíbe. Etapa 6.2.1, sección 9 del prompt
+  // (CORRECCIÓN, CONFIRMADO): el costo aplicable es el vigente al
+  // `periodEnd` del período que se está cerrando -- NUNCA el del momento en
+  // que el ADMIN mira este checklist o hace clic en cerrar (eso es lo que
+  // `closeWeeklyClosing` congela realmente, ver el comentario extenso ahí;
+  // este checklist debe predecir exactamente eso, nunca un número distinto
+  // que el cierre real no podría confirmar).
   const missingCostProducts =
     closing.status === 'CLOSED'
       ? []
-      : await computeMissingCostProducts(fastify.db, organizationId, liveItems, new Date());
+      : await computeMissingCostProducts(fastify.db, organizationId, liveItems, closing.periodEnd);
 
   return {
     countSubmitted,
@@ -715,7 +721,27 @@ export async function closeWeeklyClosing(
       // punto. `asOfDate` se captura UNA sola vez y se usa tanto para el
       // chequeo como para el valor que efectivamente se congela -- nunca
       // dos lecturas en instantes distintos que podrían discrepar.
-      const asOfDate = new Date();
+      //
+      // Etapa 6.2.1, sección 9 del prompt (CORRECCIÓN, CONFIRMADO): el
+      // costo aplicable es el vigente al `periodEnd` del período que se
+      // cierra, NUNCA "ahora" (el instante en que el ADMIN ejecuta este
+      // `close`). Etapa 6.2 usaba `new Date()` acá -- un cierre hecho tarde
+      // (ej. el 10/09 para la semana 01/09..07/09) podía congelar un costo
+      // que recién entró en vigencia DESPUÉS del período (ej. el 09/09),
+      // violando "el momento administrativo del cierre no debe alterar la
+      // valorización histórica del período" (ejemplo textual del prompt).
+      // `periodEnd`/`effectiveFrom` son ambos `@db.Date` (fecha pura, sin
+      // hora ni huso horario -- ver comentario de `PriceValue` en el
+      // schema), así que usar `closing.periodEnd` tal cual, sin ninguna
+      // conversión de zona horaria, ya compara "mismo día calendario"
+      // exactamente como corresponde: un costo con `effectiveFrom ==
+      // periodEnd` (entra en vigencia el propio domingo de cierre) SÍ
+      // aplica a esa semana; uno con `effectiveFrom == periodEnd + 1`
+      // (el lunes siguiente) NO. Reabrir y recerrar reutiliza el MISMO
+      // `periodEnd` (columna fija de este `WeeklyClosing`), así que nunca
+      // puede "filtrarse" hacia adelante un costo que entró en vigencia
+      // después de la semana, sin importar cuándo se recierre.
+      const asOfDate = closing.periodEnd;
       const missingCostProducts = await computeMissingCostProducts(
         tx,
         organizationId,

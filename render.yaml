@@ -15,12 +15,17 @@ services:
     # `migrate:deploy` + `seed` acá (bootstrap del primer Supabase recién
     # creado, sin Node local) ya cumplió su propósito -- el primer deploy
     # funcionó y el usuario confirmó login exitoso. Se revierte para volver
-    # al flujo manual documentado: cada migración nueva (incluida la de
-    # Etapa 6.2) se aplica a mano con `npx prisma migrate deploy` apuntando
-    # a `DATABASE_URL`/`DIRECT_URL` de Supabase, ANTES de este deploy, nunca
-    # de forma automática. Dejarlo automático reseedearía (sin destruir
-    # datos, el seed es idempotente por upsert, pero igual es innecesario e
-    # imprevisible) en cada deploy futuro.
+    # al flujo manual documentado: cada migración nueva (incluidas las de
+    # Etapa 6.2 y 6.2.1) se aplica a mano con `npx prisma migrate deploy`
+    # apuntando a `DATABASE_URL`/`DIRECT_URL` de Supabase, ANTES de este
+    # deploy, nunca de forma automática. Dejarlo automático reseedearía (sin
+    # destruir datos, el seed es idempotente por upsert, pero igual es
+    # innecesario e imprevisible) en cada deploy futuro.
+    #
+    # Etapa 6.2.1 agregó UNA migración nueva, puramente aditiva:
+    # `20260912090000_deposito_closed_units_etapa6_2_1` -- debe aplicarse a
+    # mano en staging/producción ANTES de este deploy, igual que la de
+    # Etapa 6.2, ver docs/ETAPA-6.2.1-CORRECCIONES-HITO1.md, sección "Staging".
     buildCommand: npm ci && npm run build --workspace packages/shared-types && npm run generate --workspace packages/db
     # Prisma 6 con el generador `prisma-client` emite el cliente como fuente TS
     # (no JS precompilado) -- el backend corre con tsx en desarrollo Y en

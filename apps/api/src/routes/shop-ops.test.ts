@@ -267,6 +267,39 @@ describe('/api/shop', () => {
       expect(item.physicalQuantity).toBe('3.500');
     });
 
+    it('Etapa 6.2.1: la existencia de depósito de un sabor se suma a la física con el mismo mecanismo que las latas cerradas de salón', async () => {
+      // 2 latas cerradas en salón + 1 lata abierta a la MITAD + 4 latas
+      // cerradas en el depósito propio de la heladería = 2 + 0.5 + 4 = 6.5.
+      const response = await submitCount(adminAuthHeader, {
+        locationId: locationShop,
+        weekStart: '2026-09-07',
+        items: [
+          {
+            productId: productFlavor,
+            closedUnits: 2,
+            openUnits: 1,
+            openFraction: 'HALF',
+            depositoClosedUnits: 4,
+          },
+        ],
+        idempotencyKey: 'conteo-sabor-deposito',
+      });
+      expect(response.statusCode).toBe(201);
+      const item = response.json().data.items[0];
+      expect(item.depositoClosedUnits).toBe(4);
+      expect(item.physicalQuantity).toBe('6.500');
+    });
+
+    it('Etapa 6.2.1: un producto SIN sabor no admite existencia de depósito (400)', async () => {
+      const response = await submitCount(adminAuthHeader, {
+        locationId: locationShop,
+        weekStart: '2026-09-07',
+        items: [{ productId: productClosed, closedUnits: 1, depositoClosedUnits: 2 }],
+        idempotencyKey: 'conteo-deposito-no-sabor',
+      });
+      expect(response.statusCode).toBe(400);
+    });
+
     it('exige la fracción estimada cuando hay latas abiertas de un sabor (400)', async () => {
       const response = await submitCount(adminAuthHeader, {
         locationId: locationShop,

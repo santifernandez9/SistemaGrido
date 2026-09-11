@@ -117,6 +117,7 @@ const countItemSchema = z.object({
   closedUnits: z.number().int().nonnegative().optional(),
   openUnits: z.number().int().nonnegative().optional(),
   openFraction: z.enum(OPEN_CONTAINER_FRACTIONS).optional(),
+  depositoClosedUnits: z.number().int().nonnegative().optional(),
 });
 
 const submitCountSchema = z.object({

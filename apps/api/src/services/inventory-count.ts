@@ -69,6 +69,7 @@ function mapCountItem(row: CountItemRow): InventoryCountItemResult {
     closedUnits: row.closedUnits,
     openUnits: row.openUnits,
     openFraction: row.openFraction,
+    depositoClosedUnits: row.depositoClosedUnits,
     physicalQuantity: row.physicalQuantity.toFixed(3),
     theoreticalQuantity: row.theoreticalQuantity?.toFixed(3) ?? null,
     difference: row.difference?.toFixed(3) ?? null,
@@ -233,6 +234,7 @@ function canonicalItemsForFingerprint(items: InventoryCountDraftItem[]) {
       closedUnits: item.closedUnits ?? null,
       openUnits: item.openUnits ?? null,
       openFraction: item.openFraction ?? null,
+      depositoClosedUnits: item.depositoClosedUnits ?? null,
     }))
     .sort((a, b) => a.productId.localeCompare(b.productId));
 }
@@ -363,6 +365,7 @@ interface ComputedItem {
   closedUnits: number | null;
   openUnits: number | null;
   openFraction: InventoryCountDraftItem['openFraction'] | null;
+  depositoClosedUnits: number | null;
   physicalQuantity: Prisma.Decimal;
 }
 
@@ -379,6 +382,7 @@ async function computeItem(
   const closedUnits = item.closedUnits ?? null;
   const openUnits = item.openUnits ?? null;
   const openFraction = item.openFraction ?? null;
+  const depositoClosedUnits = item.depositoClosedUnits ?? null;
 
   if (closedUnits !== null && (!Number.isInteger(closedUnits) || closedUnits < 0)) {
     throw new ValidationError(`Cantidad de cerrados inválida para el producto ${product.name}`);
@@ -396,7 +400,27 @@ async function computeItem(
       `Falta indicar la fracción estimada de las unidades abiertas para el sabor ${product.name}`,
     );
   }
-  if (closedUnits === null && openUnits === null) {
+  // Etapa 6.2.1, secciones 2/3/4 del prompt: la columna "Depósito" de la
+  // planilla real sólo existe para SABORES -- ver el comentario extenso de
+  // `InventoryCountItem.depositoClosedUnits` en schema.prisma. Un producto
+  // sin sabor no tiene esa columna en el catálogo/conversiones, así que
+  // recibirla acá sería precisamente "inventar una configuración que no
+  // existe" (sección 4 del prompt): se rechaza explícitamente en vez de
+  // aceptarla en silencio.
+  if (depositoClosedUnits !== null && !product.flavorId) {
+    throw new ValidationError(
+      `El producto ${product.name} no es un sabor: no admite existencia de depósito`,
+    );
+  }
+  if (
+    depositoClosedUnits !== null &&
+    (!Number.isInteger(depositoClosedUnits) || depositoClosedUnits < 0)
+  ) {
+    throw new ValidationError(
+      `Cantidad de existencia en depósito inválida para el producto ${product.name}`,
+    );
+  }
+  if (closedUnits === null && openUnits === null && depositoClosedUnits === null) {
     throw new ValidationError(`Debe indicarse alguna cantidad contada para ${product.name}`);
   }
 
@@ -409,13 +433,21 @@ async function computeItem(
         .mul(openContainerFractionMultiplier(fastify, openFraction))
         .mul(conversionFactor)
     : new Prisma.Decimal(openUnits ?? 0);
+  // Misma mecánica que `closedContribution` -- Salón-cerrada y
+  // Depósito-existencia son ambas latas CERRADAS del mismo producto en la
+  // misma `Location`, así que se suman con el mismo factor de conversión
+  // (nunca una fracción nueva, nunca un teórico/ledger separado).
+  const depositoContribution = depositoClosedUnits
+    ? new Prisma.Decimal(depositoClosedUnits).mul(conversionFactor)
+    : new Prisma.Decimal(0);
 
   return {
     productId: item.productId,
     closedUnits,
     openUnits,
     openFraction,
-    physicalQuantity: closedContribution.add(openContribution),
+    depositoClosedUnits,
+    physicalQuantity: closedContribution.add(openContribution).add(depositoContribution),
   };
 }
 
@@ -528,6 +560,7 @@ export async function submitInventoryCount(
               closedUnits: item.closedUnits,
               openUnits: item.openUnits,
               openFraction: item.openFraction ?? undefined,
+              depositoClosedUnits: item.depositoClosedUnits,
               physicalQuantity: item.physicalQuantity,
               theoreticalQuantity: item.theoreticalQuantity,
               difference: item.difference,
@@ -702,6 +735,7 @@ export async function submitInventoryRecount(
             closedUnits: item.closedUnits,
             openUnits: item.openUnits,
             openFraction: item.openFraction ?? null,
+            depositoClosedUnits: item.depositoClosedUnits,
             physicalQuantity: item.physicalQuantity,
             difference,
             recounted: true,

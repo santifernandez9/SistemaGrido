@@ -1,5 +1,12 @@
 # ETAPA 6.2 — Cierre Integral del Hito 1 / Pilot Readiness
 
+> **Etapa 6.2.1** (`docs/ETAPA-6.2.1-CORRECCIONES-HITO1.md`) corrigió varios
+> gaps encontrados en la auditoría de esta etapa -- el más importante, la
+> Shop PWA (sección 17), que quedaba explícitamente sin implementar acá.
+> Este documento se mantiene como registro histórico del diseño original,
+> con banners `>` en cada sección que Etapa 6.2.1 corrigió; para el estado
+> ACTUAL de esos puntos, seguí los banners hacia el documento de 6.2.1.
+
 Versión: 1.0 · Rama: `claude/etapa-6-cierre-semanal`
 
 Extiende Etapa 6/6.1 (`docs/ETAPA-6-CIERRE-SEMANAL.md`) sin reabrir ni destruir
@@ -216,7 +223,15 @@ Almendrado...") probado literalmente en
 `priceValueId` (FK al `PriceValue` EXACTO usado). `closeWeeklyClosing`
 (`weekly-closing.ts`), dentro de la transacción de cierre:
 
-1. Captura `asOfDate = new Date()` UNA sola vez.
+> **Corrección de Etapa 6.2.1** (`docs/ETAPA-6.2.1-CORRECCIONES-HITO1.md`,
+> sección 3): `asOfDate` YA NO es `new Date()` -- pasó a ser
+> `closing.periodEnd`, para que un cierre hecho tarde nunca congele un
+> costo que entró en vigencia después del período. El resto de esta
+> sección (congelado permanente, `priceValueId`, Decimal end-to-end) sigue
+> exactamente igual.
+
+1. Captura `asOfDate = closing.periodEnd` UNA sola vez (Etapa 6.2.1:
+   antes era `new Date()` -- ver el banner de arriba).
 2. Chequeo AUTORITATIVO de costos faltantes (`computeMissingCostProducts`,
    con `tx`) — repite, pero DENTRO de la transacción, el mismo chequeo que
    ya se muestra como adelanto informativo en el checklist (fuera de
@@ -276,6 +291,14 @@ general).
 
 ## 11. Depósito en Hito 1 (sección 13 del prompt)
 
+> **Corrección de Etapa 6.2.1** (`docs/ETAPA-6.2.1-CORRECCIONES-HITO1.md`,
+> sección 5): se agregó `apps/api/src/routes/deposit-stock.test.ts`, una
+> demostración/prueba explícita y dedicada de que el ledger genérico ya
+> soporta correctamente una `Location` DEPOT -- sin ningún cambio de
+> arquitectura, exactamente como esta sección ya predecía. Sigue sin
+> construirse ninguna pantalla/flujo NUEVO de depósito (pedidos, remitos,
+> reparto, etc. siguen fuera de alcance, Etapa 8).
+
 **NO se implementó nada nuevo para depósito/cámara en esta entrega.** El
 ledger de Etapa 3 ya permite registrar/consultar stock de una ubicación
 `DEPOT` como cualquier otra (`InventoryMovement.locationId`), así que
@@ -325,6 +348,13 @@ mapeo, confirmación de faltante/sobrante, resolución de tipeo, cierre
 general) usan `audit.logTx` dentro de su propia transacción desde el
 diseño inicial, nunca `audit.log` suelto.
 
+> **Corrección de Etapa 6.2.1** (`docs/ETAPA-6.2.1-CORRECCIONES-HITO1.md`,
+> sección 4): esta corrección de atomicidad quedó sin un test que la
+> probara de forma OBSERVABLE (más allá de que `logTx` se llamara). Se
+> agregó ese test -- fuerza el fallo real del `INSERT` de auditoría dentro
+> de la transacción y verifica, contra Postgres real, que el `UPDATE` de
+> estado también hizo rollback.
+
 ## 14. Concurrencia e idempotencia
 
 Adicional a lo ya cubierto en Etapa 3.1/3.2/4.1/5.1/5.2/6/6.1 (que sigue
@@ -369,9 +399,19 @@ faltante/sobrante, candidatos de posible error de tipeo con
 confirmar/rechazar, y un panel de cierre semanal GENERAL (estado por
 heladería + botón de cierre general).
 
-## 17. Shop PWA (sección 3/19 del prompt) — NO implementado en esta entrega
+## 17. Shop PWA (sección 3/19 del prompt) — implementado en Etapa 6.2.1
 
-**Limitación documentada, no funcionalidad entregada.** El pedido incluía
+> **Corrección de Etapa 6.2.1** (`docs/ETAPA-6.2.1-CORRECCIONES-HITO1.md`,
+> sección 2): este era el BLOCKER principal señalado por la auditoría de
+> Etapa 6.2. Se implementó por completo -- agrupación dinámica por
+> categoría, presentación por producto, mecánica Salón/Depósito para
+> sabores (columna nueva y aditiva `InventoryCountItem.depositoClosedUnits`,
+> migración `20260912090000_...`), conteo ciego y autoguardado preservados.
+> El resto de esta sección queda como registro histórico de lo que NO
+> estaba hecho al cierre de Etapa 6.2.
+
+**Limitación documentada, no funcionalidad entregada [ESTADO ANTERIOR A
+ETAPA 6.2.1 -- ver el banner de arriba].** El pedido incluía
 reestructurar la pantalla de conteo de la Shop PWA para agrupar por
 familia/categoría del catálogo (no hardcodeada), soportar presentaciones
 reales por producto, distinguir Salón/Depósito, y la mecánica de sabores
@@ -530,18 +570,18 @@ tocó ni se expandió en esta entrega.
   doc) — la única alternativa sin código de artículo hubiera sido
   similarity matching, explícitamente prohibido por el prompt sin
   confirmación humana.
-- **`asOfDate` de la valorización = momento del `close`** (no
-  `periodEnd`): el prompt no distingue explícitamente entre "vigente al
-  cierre del período" y "vigente al momento de ejecutar el cierre"; se
-  eligió el momento REAL de la acción (`closedAt`) por ser la lectura más
-  literal de "costo vigente" y la más simple de razonar bajo concurrencia
-  (sección 17). Documentado acá en vez de asumido en silencio.
+- **`asOfDate` de la valorización** — Etapa 6.2 eligió el momento REAL del
+  `close` (`closedAt`) por ser la lectura más literal de "costo vigente".
+  **Etapa 6.2.1 revirtió esta decisión**: el cliente confirmó explícitamente
+  que debe ser el `periodEnd` del período que se cierra, no el instante del
+  clic — ver `docs/ETAPA-6.2.1-CORRECCIONES-HITO1.md`, sección 3, con el
+  ejemplo numérico exacto que motivó el cambio.
 - **25% de faltante como constante de código, no variable de entorno**: a
   diferencia de los umbrales ABSOLUTOS de Etapa 4.1 (nunca confirmados con
   un valor concreto, por eso siguen sin default), el 25% SÍ es un literal
   confirmado textualmente por el cliente — mismo criterio que las
   fracciones de `OpenContainerFraction`.
-- **Depósito**: ver sección 11 — limitación documentada explícitamente, no
-  resuelta.
-- **Shop PWA**: ver sección 17 — no implementado en esta entrega, gap
-  documentado explícitamente.
+- **Depósito**: ver sección 11 — validación mínima agregada en Etapa 6.2.1
+  (sin cambios de arquitectura); Etapa 8 sigue fuera de alcance.
+- **Shop PWA**: ver sección 17 — implementada en Etapa 6.2.1 (era el
+  blocker principal de la auditoría de Etapa 6.2).
