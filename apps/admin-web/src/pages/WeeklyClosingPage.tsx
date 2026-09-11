@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth, ApiClientError } from '@sistema-grido/auth-client';
 import type {
+  DifferenceResolutionKind,
+  GeneralWeeklyClosing,
+  InventoryCount,
+  InventoryCountTypoCandidate,
   LocationSummary,
   Page,
   WeeklyClosing,
@@ -89,6 +93,8 @@ export function WeeklyClosingPage() {
         ledger de inventario sigue siendo la única fuente de verdad de stock -- este cierre sólo
         compara y genera un ajuste + una foto histórica al confirmar.
       </p>
+
+      <GeneralWeeklyClosingPanel periodStart={periodStart} />
 
       <section className="card">
         <h2>Elegir sucursal y semana</h2>
@@ -203,6 +209,166 @@ function ClosingStatusBadge({ status }: { status: WeeklyClosing['status'] }) {
   return <span className={className}>{STATUS_LABELS[status]}</span>;
 }
 
+/**
+ * Cierre semanal GENERAL (Etapa 6.2, sección 12 del prompt) -- a nivel
+ * organización, independiente de los cierres por ubicación de arriba: cierra
+ * cuando TODAS las heladerías activas requeridas ya cerraron individualmente
+ * su semana. No se fusiona con el modelo de datos por ubicación.
+ */
+interface GeneralWeeklyClosingPanelProps {
+  periodStart: string;
+}
+
+function GeneralWeeklyClosingPanel({ periodStart }: GeneralWeeklyClosingPanelProps) {
+  const { api } = useAuth();
+  const [general, setGeneral] = useState<GeneralWeeklyClosing | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [closing, setClosingBusy] = useState(false);
+  const [closeError, setCloseError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setGeneral(
+        await api.get<GeneralWeeklyClosing>(
+          `/api/weekly-closings/general?periodStart=${periodStart}`,
+        ),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'No se pudo cargar el cierre general');
+    } finally {
+      setLoading(false);
+    }
+  }, [api, periodStart]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function handleClose() {
+    setClosingBusy(true);
+    setCloseError(null);
+    try {
+      await api.post<GeneralWeeklyClosing>('/api/weekly-closings/general/close', {
+        periodStart,
+        idempotencyKey: crypto.randomUUID(),
+      });
+      await load();
+    } catch (err) {
+      setCloseError(err instanceof ApiClientError ? err.message : 'No se pudo cerrar la semana');
+    } finally {
+      setClosingBusy(false);
+    }
+  }
+
+  return (
+    <section className="card">
+      <h2>Cierre semanal general</h2>
+      <p className="muted">
+        Cierra la semana {periodStart} — {periodEndOf(periodStart)} a nivel organización, cuando
+        todas las heladerías activas ya cerraron su semana individualmente.
+      </p>
+      {loading ? (
+        <p>Cargando...</p>
+      ) : error ? (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      ) : general ? (
+        <>
+          <dl className="detail-grid">
+            <dt>Estado</dt>
+            <dd>{general.status === 'CLOSED' ? 'Cerrado' : 'Abierto'}</dd>
+            {general.status === 'CLOSED' && (
+              <>
+                <dt>Cerrado por</dt>
+                <dd>
+                  {general.closedByName} —{' '}
+                  {general.closedAt ? new Date(general.closedAt).toLocaleString('es-AR') : ''}
+                </dd>
+              </>
+            )}
+          </dl>
+          {general.locations.length === 0 ? (
+            <p className="empty-state">No hay heladerías activas configuradas.</p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Heladería</th>
+                  <th>Estado del cierre</th>
+                  <th>Lista</th>
+                </tr>
+              </thead>
+              <tbody>
+                {general.locations.map((l) => (
+                  <tr key={l.locationId}>
+                    <td>{l.locationName}</td>
+                    <td>
+                      {l.weeklyClosingStatus
+                        ? STATUS_LABELS[l.weeklyClosingStatus]
+                        : 'Sin preparar'}
+                    </td>
+                    <td>{l.ready ? '✓' : '✗'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {closeError && (
+            <p className="error" role="alert">
+              {closeError}
+            </p>
+          )}
+          {general.status !== 'CLOSED' && (
+            <div className="form-actions">
+              <button
+                type="button"
+                onClick={() => void handleClose()}
+                disabled={closing || !general.canClose}
+              >
+                {closing ? 'Cerrando...' : 'Cerrar semana (general)'}
+              </button>
+            </div>
+          )}
+        </>
+      ) : null}
+    </section>
+  );
+}
+
+const MISSING_COST_REASON_LABELS: Record<
+  WeeklyClosingDetail['checklist']['missingCostProducts'][number]['reason'],
+  string
+> = {
+  NO_MAPPING: 'sin mapeo de costo',
+  NO_VIGENT_VALUE: 'mapeado pero sin costo vigente',
+};
+
+const DIFFERENCE_RESOLUTION_LABELS: Record<DifferenceResolutionKind, string> = {
+  SHORTAGE_CONFIRMED: 'Faltante confirmado',
+  SURPLUS_RESOLVED: 'Sobrante revisado',
+};
+
+const TYPO_CANDIDATE_STATUS_LABELS: Record<'CONFIRMED' | 'REJECTED', string> = {
+  CONFIRMED: 'Confirmado',
+  REJECTED: 'Rechazado',
+};
+
+/** Motivos legibles por los que todavía no se puede cerrar la semana --
+ * incluye ahora "Costos faltantes" (Etapa 6.2, sección 11 del prompt). */
+function missingReasons(checklist: WeeklyClosingDetail['checklist']): string[] {
+  const reasons: string[] = [];
+  if (!checklist.countSubmitted) reasons.push('el conteo físico semanal completo');
+  if (!checklist.reviewConfirmedById) reasons.push('la confirmación de revisión del checklist');
+  if (checklist.missingCostProducts.length > 0) {
+    reasons.push('cargar el costo de los productos listados en "Costos faltantes"');
+  }
+  return reasons;
+}
+
 interface WeeklyClosingDetailPanelProps {
   closingId: string;
   onClose: () => void;
@@ -226,6 +392,15 @@ function WeeklyClosingDetailPanel({
   const [reopenReason, setReopenReason] = useState('');
   const [reopening, setReopening] = useState(false);
 
+  // Etapa 6.2, secciones 4/5/6 -- diferencias por ítem y posibles errores de
+  // tipeo viven en el `InventoryCount` gobernante, no en `WeeklyClosingItem`.
+  const [governingCount, setGoverningCount] = useState<InventoryCount | null>(null);
+  const [governingCountLoading, setGoverningCountLoading] = useState(false);
+  const [governingCountError, setGoverningCountError] = useState<string | null>(null);
+  const [resolvingItemId, setResolvingItemId] = useState<string | null>(null);
+  const [resolvingCandidateId, setResolvingCandidateId] = useState<string | null>(null);
+  const [diffActionError, setDiffActionError] = useState<string | null>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -241,6 +416,80 @@ function WeeklyClosingDetailPanel({
   useEffect(() => {
     void load();
   }, [load]);
+
+  const governingCountId = detail?.checklist.governingCountId ?? null;
+
+  const loadGoverningCount = useCallback(
+    async (countId: string) => {
+      setGoverningCountLoading(true);
+      setGoverningCountError(null);
+      try {
+        setGoverningCount(await api.get<InventoryCount>(`/api/shop/counts/${countId}`));
+      } catch (err) {
+        setGoverningCountError(
+          err instanceof Error ? err.message : 'No se pudo cargar el conteo gobernante',
+        );
+      } finally {
+        setGoverningCountLoading(false);
+      }
+    },
+    [api],
+  );
+
+  useEffect(() => {
+    if (governingCountId) {
+      void loadGoverningCount(governingCountId);
+    } else {
+      setGoverningCount(null);
+    }
+  }, [governingCountId, loadGoverningCount]);
+
+  async function handleResolveDifference(itemId: string, kind: DifferenceResolutionKind) {
+    if (!governingCount) return;
+    setResolvingItemId(itemId);
+    setDiffActionError(null);
+    try {
+      const updated = await api.post<InventoryCount>(
+        `/api/shop/counts/${governingCount.id}/items/${itemId}/resolve-difference`,
+        { kind },
+      );
+      setGoverningCount(updated);
+    } catch (err) {
+      setDiffActionError(
+        err instanceof ApiClientError ? err.message : 'No se pudo resolver la diferencia',
+      );
+    } finally {
+      setResolvingItemId(null);
+    }
+  }
+
+  async function handleResolveTypoCandidate(candidateId: string, status: 'CONFIRMED' | 'REJECTED') {
+    if (!governingCount) return;
+    setResolvingCandidateId(candidateId);
+    setDiffActionError(null);
+    try {
+      const updatedCandidate = await api.post<InventoryCountTypoCandidate>(
+        `/api/shop/counts/${governingCount.id}/typo-candidates/${candidateId}/resolve`,
+        { status },
+      );
+      setGoverningCount((current) =>
+        current
+          ? {
+              ...current,
+              typoCandidates: current.typoCandidates.map((c) =>
+                c.id === updatedCandidate.id ? updatedCandidate : c,
+              ),
+            }
+          : current,
+      );
+    } catch (err) {
+      setDiffActionError(
+        err instanceof ApiClientError ? err.message : 'No se pudo resolver la sugerencia',
+      );
+    } finally {
+      setResolvingCandidateId(null);
+    }
+  }
 
   async function handleConfirmReview() {
     setConfirmingReview(true);
@@ -363,6 +612,20 @@ function WeeklyClosingDetailPanel({
             ? `Confirmada por ${checklist.reviewConfirmedByName} — ${checklist.reviewConfirmedAt ? new Date(checklist.reviewConfirmedAt).toLocaleString('es-AR') : ''}`
             : 'Pendiente'}
         </dd>
+        <dt>Costos faltantes</dt>
+        <dd>
+          {checklist.missingCostProducts.length === 0 ? (
+            'Ninguno'
+          ) : (
+            <ul>
+              {checklist.missingCostProducts.map((p) => (
+                <li key={p.productId} className="negative-quantity">
+                  {p.productName} ({p.quantityReal}): {MISSING_COST_REASON_LABELS[p.reason]}
+                </li>
+              ))}
+            </ul>
+          )}
+        </dd>
       </dl>
 
       {c.status !== 'CLOSED' && !checklist.reviewConfirmedById && (
@@ -394,6 +657,8 @@ function WeeklyClosingDetailPanel({
               <th>Real</th>
               <th>Diferencia</th>
               <th>Ajuste generado</th>
+              <th>Costo unitario</th>
+              <th>Valor total</th>
             </tr>
           </thead>
           <tbody>
@@ -406,10 +671,136 @@ function WeeklyClosingDetailPanel({
                   {i.difference}
                 </td>
                 <td>{i.countCorrectionMovementId ? 'Sí' : '—'}</td>
+                <td>{i.unitCostWithTax ?? '—'}</td>
+                <td>{i.totalValue ?? '—'}</td>
               </tr>
             ))}
           </tbody>
         </table>
+      )}
+
+      {itemsWithDifference.length > 0 && (
+        <>
+          <h3>Diferencias</h3>
+          {governingCountLoading ? (
+            <p>Cargando diferencias...</p>
+          ) : governingCountError ? (
+            <p className="error" role="alert">
+              {governingCountError}
+            </p>
+          ) : !governingCount ? (
+            <p className="empty-state">
+              No se pudo determinar el conteo gobernante para revisar las diferencias.
+            </p>
+          ) : (
+            <table>
+              <thead>
+                <tr>
+                  <th>Producto</th>
+                  <th>Diferencia</th>
+                  <th>Resolución</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {itemsWithDifference.map((i) => {
+                  const countItem = governingCount.items.find((ci) => ci.productId === i.productId);
+                  const isNegative = i.difference.startsWith('-');
+                  return (
+                    <tr key={i.productId}>
+                      <td>{i.productName}</td>
+                      <td className={isNegative ? 'negative-quantity' : undefined}>
+                        {i.difference}
+                      </td>
+                      <td>
+                        {!countItem
+                          ? '—'
+                          : countItem.differenceResolution
+                            ? `${DIFFERENCE_RESOLUTION_LABELS[countItem.differenceResolution]} — ${countItem.differenceResolvedByName ?? ''} (${countItem.differenceResolvedAt ? new Date(countItem.differenceResolvedAt).toLocaleString('es-AR') : ''})`
+                            : 'Pendiente de revisión'}
+                      </td>
+                      <td>
+                        {countItem && !countItem.differenceResolution && (
+                          <div className="row-actions">
+                            {isNegative && (
+                              <button
+                                type="button"
+                                disabled={resolvingItemId === countItem.id}
+                                onClick={() =>
+                                  void handleResolveDifference(countItem.id, 'SHORTAGE_CONFIRMED')
+                                }
+                              >
+                                Confirmar faltante
+                              </button>
+                            )}
+                            {!isNegative && (
+                              <button
+                                type="button"
+                                disabled={resolvingItemId === countItem.id}
+                                onClick={() =>
+                                  void handleResolveDifference(countItem.id, 'SURPLUS_RESOLVED')
+                                }
+                              >
+                                Marcar sobrante revisado
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+        </>
+      )}
+
+      {governingCount && governingCount.typoCandidates.length > 0 && (
+        <>
+          <h3>Posibles errores de tipeo</h3>
+          <ul>
+            {governingCount.typoCandidates.map((tc) => (
+              <li key={tc.id}>
+                Posible error de tipeo entre {tc.shortageProductName} y {tc.surplusProductName}: la
+                diferencia de {tc.compensatingQuantity} unidades de un producto se compensa con{' '}
+                {tc.compensatingQuantity} unidades del otro y ambos tienen el mismo precio de venta
+                (${tc.salePriceUsed}).
+                {tc.status === 'PENDING' ? (
+                  <div className="row-actions">
+                    <button
+                      type="button"
+                      disabled={resolvingCandidateId === tc.id}
+                      onClick={() => void handleResolveTypoCandidate(tc.id, 'CONFIRMED')}
+                    >
+                      Confirmar
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={resolvingCandidateId === tc.id}
+                      onClick={() => void handleResolveTypoCandidate(tc.id, 'REJECTED')}
+                    >
+                      Rechazar
+                    </button>
+                  </div>
+                ) : (
+                  <span className="muted">
+                    {' '}
+                    — {TYPO_CANDIDATE_STATUS_LABELS[tc.status]} por {tc.resolvedByName} —{' '}
+                    {tc.resolvedAt ? new Date(tc.resolvedAt).toLocaleString('es-AR') : ''}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
+      {diffActionError && (
+        <p className="error" role="alert">
+          {diffActionError}
+        </p>
       )}
 
       {actionError && (
@@ -420,10 +811,7 @@ function WeeklyClosingDetailPanel({
 
       {c.status !== 'CLOSED' && !checklist.canClose && (
         <p className="muted">
-          Todavía no se puede cerrar esta semana: hace falta{' '}
-          {!checklist.countSubmitted && 'el conteo físico semanal completo'}
-          {!checklist.countSubmitted && !checklist.reviewConfirmedById && ' y '}
-          {!checklist.reviewConfirmedById && 'la confirmación de revisión del checklist'}.
+          Todavía no se puede cerrar esta semana: hace falta {missingReasons(checklist).join(', ')}.
         </p>
       )}
 
