@@ -1047,4 +1047,130 @@ describe('/api/weekly-closings', () => {
       expect(await stockOf(productA)).toBe('9.000');
     });
   });
+
+  describe('Etapa 6.2 — valorización del cierre (costo C/IVA)', () => {
+    it('cerrar queda BLOQUEADO si un producto con stock real no tiene costo vigente; se habilita al resolver el mapeo/costo', async () => {
+      const category = await prisma.category.create({
+        data: { organizationId, name: 'Sin costo' },
+      });
+      const productType = await prisma.productType.findFirstOrThrow({
+        where: { organizationId, code: 'INSUMO' },
+      });
+      const unitOfMeasure = await prisma.unitOfMeasure.findFirstOrThrow({
+        where: { organizationId, code: 'UNIDAD' },
+      });
+      const productE = await prisma.product.create({
+        data: {
+          organizationId,
+          name: 'Producto E',
+          categoryId: category.id,
+          productTypeId: productType.id,
+          unitOfMeasureId: unitOfMeasure.id,
+          unitsPerHandlingUnit: 1,
+        },
+      });
+
+      await app.inject({
+        method: 'POST',
+        url: '/api/inventory/stock/initial',
+        headers: adminAuthHeader,
+        payload: { locationId: locationShop, productId: productE.id, enteredQuantity: '5' },
+      });
+
+      const prepared = await prepareClosing();
+      const id = prepared.json().data.id as string;
+      const countRes = await app.inject({
+        method: 'POST',
+        url: '/api/shop/counts',
+        headers: adminAuthHeader,
+        payload: {
+          locationId: locationShop,
+          weekStart: GOVERNING_WEEK_START,
+          items: [{ productId: productE.id, closedUnits: 5 }],
+          idempotencyKey: 'conteo-sin-costo',
+        },
+      });
+      expect(countRes.statusCode).toBe(201);
+      await confirmReview(id);
+
+      const blocked = await closeClosing(id, 'cierre-sin-costo-1');
+      expect(blocked.statusCode).toBe(409);
+      expect(blocked.json().error.message).toContain('Producto E');
+
+      await seedProductCost({
+        organizationId,
+        productId: productE.id,
+        productName: 'Producto E',
+        actorId: adminUserId,
+        costWithTax: '50.00',
+      });
+
+      const retry = await closeClosing(id, 'cierre-sin-costo-2');
+      expect(retry.statusCode).toBe(200);
+      const item = retry
+        .json()
+        .data.items.find((i: { productId: string }) => i.productId === productE.id);
+      expect(item.unitCostWithTax).toBe('50.00');
+      expect(item.totalValue).toBe('250.00'); // 5 * 50.00
+    });
+
+    it('una lista de precios importada DESPUÉS del cierre nunca altera el snapshot ya congelado (ejemplo del prompt: costo $100 -> $1.200 congelado, sube después)', async () => {
+      const id = await readyToClose();
+      const closeRes = await closeClosing(id, 'cierre-valorizacion-1');
+      expect(closeRes.statusCode).toBe(200);
+      const before = closeRes
+        .json()
+        .data.items.find((i: { productId: string }) => i.productId === productA);
+      expect(before.unitCostWithTax).toBe('100.00');
+      expect(before.quantityReal).toBe('12.000'); // real del conteo gobernante
+      expect(before.totalValue).toBe('1200.00'); // 12 * 100.00
+
+      // Simula un import de precios POSTERIOR con un costo distinto para el
+      // MISMO producto (misma PriceReference, label "Producto A").
+      const reference = await prisma.priceReference.findFirstOrThrow({
+        where: { organizationId, priceType: 'COST_WITH_TAX', label: 'Producto A' },
+      });
+      const laterImport = await prisma.priceListImport.create({
+        data: {
+          organizationId,
+          source: 'HELACOR_COST_LIST',
+          priceType: 'COST_WITH_TAX',
+          originalFilename: 'costo-octubre.xlsx',
+          fileHash: 'hash-costo-octubre',
+          status: 'CONFIRMED',
+          totalRows: 1,
+          validRows: 1,
+          createdById: adminUserId,
+          confirmedById: adminUserId,
+          confirmedAt: new Date(),
+          effectiveFrom: new Date('2026-10-01'),
+          rows: {
+            create: [
+              { rowNumber: 1, rawLabel: 'Producto A', rawValueWithTax: '999.00', status: 'VALID' },
+            ],
+          },
+        },
+        include: { rows: true },
+      });
+      await prisma.priceValue.create({
+        data: {
+          organizationId,
+          priceReferenceId: reference.id,
+          priceType: 'COST_WITH_TAX',
+          value: '999.00',
+          effectiveFrom: new Date('2026-10-01'),
+          priceListImportId: laterImport.id,
+          priceListImportRowId: laterImport.rows[0]!.id,
+          createdById: adminUserId,
+        },
+      });
+
+      const detail = await getDetail(id);
+      const after = detail
+        .json()
+        .data.items.find((i: { productId: string }) => i.productId === productA);
+      expect(after.unitCostWithTax).toBe('100.00'); // sin cambios
+      expect(after.totalValue).toBe('1200.00'); // sin cambios
+    });
+  });
 });

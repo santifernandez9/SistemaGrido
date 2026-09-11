@@ -3,7 +3,9 @@ import { z } from 'zod';
 import { WEEKLY_CLOSING_STATUSES } from '@sistema-grido/shared-types';
 import type {
   ApiSuccess,
+  CloseGeneralWeeklyClosingInput,
   CloseWeeklyClosingInput,
+  GeneralWeeklyClosing,
   Page,
   PrepareWeeklyClosingInput,
   ReopenWeeklyClosingInput,
@@ -19,6 +21,10 @@ import {
   prepareWeeklyClosing,
   reopenWeeklyClosing,
 } from '../services/weekly-closing.js';
+import {
+  closeGeneralWeeklyClosing,
+  getGeneralWeeklyClosingDetail,
+} from '../services/general-weekly-closing.js';
 
 /**
  * Cierre Semanal del núcleo operativo (Etapa 6) -- ver
@@ -48,6 +54,15 @@ const prepareSchema = z.object({
 const closeSchema = z.object({ idempotencyKey: z.string().min(1) });
 
 const reopenSchema = z.object({ reason: z.string().trim().min(1) });
+
+const generalQuerySchema = z.object({
+  periodStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'periodStart debe tener formato YYYY-MM-DD'),
+});
+
+const generalCloseSchema = z.object({
+  periodStart: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'periodStart debe tener formato YYYY-MM-DD'),
+  idempotencyKey: z.string().min(1),
+});
 
 export default async function weeklyClosingRoutes(fastify: FastifyInstance): Promise<void> {
   fastify.post(
@@ -135,6 +150,44 @@ export default async function weeklyClosingRoutes(fastify: FastifyInstance): Pro
       const body: ApiSuccess<WeeklyClosingDetail> = {
         ok: true,
         data: await reopenWeeklyClosing(fastify, actor.organizationId, actor, params.id, input),
+      };
+      return body;
+    },
+  );
+
+  // --- Cierre semanal GENERAL (Etapa 6.2, sección 12 del prompt) -----------
+
+  fastify.get(
+    '/api/weekly-closings/general',
+    { preHandler: [fastify.authenticate, requireRole('ADMIN')] },
+    async (request) => {
+      const query = generalQuerySchema.parse(request.query);
+      const actor = request.currentUser!;
+      const body: ApiSuccess<GeneralWeeklyClosing> = {
+        ok: true,
+        data: await getGeneralWeeklyClosingDetail(fastify, actor.organizationId, query.periodStart),
+      };
+      return body;
+    },
+  );
+
+  fastify.post(
+    '/api/weekly-closings/general/close',
+    { preHandler: [fastify.authenticate, requireRole('ADMIN')] },
+    async (request) => {
+      const input = generalCloseSchema.parse(request.body) as CloseGeneralWeeklyClosingInput & {
+        periodStart: string;
+      };
+      const actor = request.currentUser!;
+      const body: ApiSuccess<GeneralWeeklyClosing> = {
+        ok: true,
+        data: await closeGeneralWeeklyClosing(
+          fastify,
+          actor.organizationId,
+          actor,
+          input.periodStart,
+          input,
+        ),
       };
       return body;
     },
