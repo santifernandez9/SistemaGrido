@@ -1,10 +1,11 @@
 /*
- * Rediseño visual (sin tocar ningún componente): FORMA de Starlink.com
- * (tipografía grande y en negrita, mucho espacio en blanco, botones tipo
- * píldora, tarjetas redondeadas con sombra suave) -- pero con los colores
- * reales de Grido (rosa/magenta sobre fondo claro), nunca el tema oscuro de
- * Starlink. Todos los selectores existentes se mantienen -- sólo cambian
- * los valores.
+ * Rediseño visual (sin tocar lógica de ningún componente, salvo Layout.tsx
+ * que pasó de header superior a sidebar lateral): lenguaje de Starlink.com
+ * llevado más lejos -- tipografía enorme y en negrita, MUCHO espacio en
+ * blanco, botones grandes tipo píldora, tarjetas sin borde fino (separadas
+ * sólo por sombra), sidebar lateral en vez de barra superior. Colores:
+ * rosa/magenta real de marca Grido sobre fondo claro (nunca el tema
+ * oscuro/negro de Starlink).
  */
 
 :root {
@@ -21,7 +22,7 @@
   --color-surface: #ffffff;
   --color-text: #1a1a1f;
   --color-text-dim: #6b6b76;
-  --color-border: #e6e6eb;
+  --color-border: #ececf0;
 
   --color-primary: #ec1c6e;
   --color-primary-dark: #c41259;
@@ -29,14 +30,16 @@
   --color-primary-contrast: #ffffff;
   --color-primary-tint: #fde8f1;
 
-  /* Radios/sombras -- píldoras para botones, tarjetas bien redondeadas */
-  --radius-sm: 8px;
-  --radius-md: 14px;
-  --radius-lg: 22px;
+  /* Radios/sombras -- píldoras para botones, tarjetas bien redondeadas,
+     separadas por sombra en vez de un borde fino. */
+  --radius-sm: 10px;
+  --radius-md: 16px;
+  --radius-lg: 26px;
   --radius-pill: 999px;
 
-  --shadow-sm: 0 1px 2px rgba(10, 10, 15, 0.06);
-  --shadow-md: 0 10px 30px rgba(10, 10, 15, 0.1);
+  --shadow-sm: 0 2px 10px rgba(10, 10, 15, 0.06);
+  --shadow-md: 0 16px 40px rgba(10, 10, 15, 0.1);
+  --shadow-lg: 0 24px 60px rgba(10, 10, 15, 0.14);
 }
 
 * {
@@ -53,92 +56,101 @@ body {
 .app-layout {
   min-height: 100vh;
   display: flex;
+}
+
+.app-sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
   flex-direction: column;
+  gap: 32px;
+  padding: 32px 20px;
+  background: var(--color-surface);
+  box-shadow: var(--shadow-sm);
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  overflow-y: auto;
 }
 
-.app-header {
-  display: flex;
-  align-items: center;
-  gap: 28px;
-  padding: 16px 28px;
-  background: var(--color-primary);
-  color: #fff;
-}
-
-.app-header .brand {
+.app-sidebar .brand {
   font-weight: 800;
-  font-size: 16px;
-  letter-spacing: -0.01em;
-  white-space: nowrap;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+  color: var(--color-primary);
+  padding: 0 12px;
 }
 
-.app-header nav {
+.app-sidebar nav {
   display: flex;
-  gap: 4px;
+  flex-direction: column;
+  gap: 2px;
   flex: 1;
-  flex-wrap: wrap;
 }
 
-.app-header a {
-  color: rgba(255, 255, 255, 0.8);
+.app-sidebar a {
+  color: var(--color-text-dim);
   text-decoration: none;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   letter-spacing: 0.01em;
-  padding: 8px 12px;
+  padding: 12px 16px;
   border-radius: var(--radius-pill);
   transition:
     color 0.15s ease,
     background-color 0.15s ease;
 }
 
-.app-header a:hover {
+.app-sidebar a:hover {
   color: var(--color-primary);
-  background: #fff;
+  background: var(--color-primary-tint);
 }
 
-.app-header a.active,
-.app-header a[aria-current='page'] {
-  color: var(--color-primary);
-  background: #fff;
+.app-sidebar a.active,
+.app-sidebar a[aria-current='page'] {
+  color: #fff;
+  background: var(--color-primary);
 }
 
 .who {
   display: flex;
-  align-items: center;
-  gap: 12px;
+  flex-direction: column;
+  gap: 10px;
   font-size: 13px;
-  color: rgba(255, 255, 255, 0.9);
+  color: var(--color-text-dim);
+  padding: 0 12px;
 }
 
 .who button {
   margin-top: 0;
-  background: transparent;
-  color: #fff;
-  border: 1px solid rgba(255, 255, 255, 0.5);
-  padding: 7px 16px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  border: none;
+  padding: 10px 18px;
+  width: 100%;
 }
 
 .who button:hover {
-  background: rgba(255, 255, 255, 0.15);
+  background: var(--color-border);
 }
 
 .app-main {
-  padding: 32px 24px 64px;
-  max-width: 1000px;
-  margin: 0 auto;
+  flex: 1;
+  padding: 56px 64px 96px;
+  max-width: 1100px;
   width: 100%;
 }
 
 .app-main h1 {
-  font-size: 28px;
+  font-size: 44px;
   font-weight: 800;
-  letter-spacing: -0.02em;
-  margin-bottom: 4px;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+  margin: 0 0 12px;
 }
 
 .app-main h2 {
-  font-size: 18px;
+  font-size: 20px;
   font-weight: 700;
   letter-spacing: -0.01em;
 }
@@ -154,33 +166,31 @@ body {
 
 .login-form {
   background: var(--color-surface);
-  padding: 40px 36px;
+  padding: 56px 48px;
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-md);
-  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-lg);
   display: flex;
   flex-direction: column;
   gap: 10px;
   min-width: 320px;
   width: 100%;
-  max-width: 380px;
+  max-width: 420px;
 }
 
 .login-form h1 {
-  font-size: 26px;
+  font-size: 34px;
   font-weight: 800;
-  letter-spacing: -0.02em;
-  margin: 0 0 4px;
+  letter-spacing: -0.03em;
+  margin: 0 0 8px;
   color: var(--color-primary);
 }
 
 .card {
   background: var(--color-surface);
-  padding: 24px;
+  padding: 32px;
   border-radius: var(--radius-lg);
-  margin-bottom: 20px;
-  box-shadow: var(--shadow-sm);
-  border: 1px solid var(--color-border);
+  margin-bottom: 24px;
+  box-shadow: var(--shadow-md);
 }
 
 .invite-form {
@@ -199,8 +209,8 @@ label {
 input,
 select,
 button {
-  padding: 10px 14px;
-  font-size: 14px;
+  padding: 13px 18px;
+  font-size: 15px;
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border);
   font-family: inherit;
@@ -210,7 +220,7 @@ input:focus,
 select:focus {
   outline: none;
   border-color: var(--color-primary);
-  box-shadow: 0 0 0 3px var(--color-primary-tint);
+  box-shadow: 0 0 0 4px var(--color-primary-tint);
 }
 
 button {
@@ -220,16 +230,20 @@ button {
   border: none;
   margin-top: 8px;
   font-weight: 700;
+  font-size: 15px;
   border-radius: var(--radius-pill);
-  padding: 11px 22px;
+  padding: 14px 28px;
   letter-spacing: 0.01em;
+  box-shadow: 0 8px 20px rgba(236, 28, 110, 0.28);
   transition:
     background-color 0.15s ease,
+    box-shadow 0.15s ease,
     transform 0.1s ease;
 }
 
 button:hover:not(:disabled) {
   background: var(--color-primary-dark);
+  box-shadow: 0 10px 26px rgba(196, 18, 89, 0.36);
 }
 
 button:active:not(:disabled) {
@@ -239,6 +253,7 @@ button:active:not(:disabled) {
 button:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+  box-shadow: none;
 }
 
 table {
@@ -249,7 +264,7 @@ table {
 th,
 td {
   text-align: left;
-  padding: 10px 8px;
+  padding: 14px 10px;
   border-bottom: 1px solid var(--color-border);
 }
 
@@ -298,15 +313,16 @@ th {
 }
 
 button.secondary {
-  background: #fff;
+  background: var(--color-bg);
   color: var(--color-text);
-  border: 1px solid var(--color-border);
+  border: none;
+  box-shadow: none;
   margin-top: 0;
 }
 
 button.secondary:hover:not(:disabled) {
-  background: var(--color-bg);
-  border-color: var(--color-text-dim);
+  background: var(--color-border);
+  box-shadow: none;
 }
 
 .list-toolbar {
@@ -314,7 +330,7 @@ button.secondary:hover:not(:disabled) {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
 }
 
 .list-toolbar h2 {
@@ -334,7 +350,7 @@ button.secondary:hover:not(:disabled) {
 
 .badge {
   display: inline-block;
-  padding: 3px 10px;
+  padding: 4px 12px;
   border-radius: var(--radius-pill);
   font-size: 12px;
   font-weight: 700;
@@ -369,7 +385,7 @@ button.secondary:hover:not(:disabled) {
   flex-wrap: wrap;
   gap: 12px;
   align-items: flex-end;
-  margin-bottom: 16px;
+  margin-bottom: 20px;
 }
 
 .filters label {
@@ -388,7 +404,7 @@ button.secondary:hover:not(:disabled) {
   display: flex;
   gap: 8px;
   align-items: center;
-  margin-top: 12px;
+  margin-top: 16px;
 }
 
 .movement-row {
@@ -400,15 +416,15 @@ button.secondary:hover:not(:disabled) {
 }
 
 .detail-panel {
-  margin-top: 16px;
-  padding-top: 16px;
+  margin-top: 20px;
+  padding-top: 20px;
   border-top: 1px solid var(--color-border);
 }
 
 .detail-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 8px 24px;
+  gap: 10px 24px;
   margin: 12px 0;
 }
 
@@ -428,4 +444,44 @@ button.secondary:hover:not(:disabled) {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
   color: var(--color-text-dim);
+}
+
+@media (max-width: 860px) {
+  .app-layout {
+    flex-direction: column;
+  }
+
+  .app-sidebar {
+    width: 100%;
+    height: auto;
+    position: static;
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 16px;
+    padding: 16px 20px;
+  }
+
+  .app-sidebar nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    flex: 1;
+  }
+
+  .who {
+    flex-direction: row;
+    padding: 0;
+  }
+
+  .who button {
+    width: auto;
+  }
+
+  .app-main {
+    padding: 32px 20px 64px;
+  }
+
+  .app-main h1 {
+    font-size: 32px;
+  }
 }

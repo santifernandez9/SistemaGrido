@@ -6,8 +6,8 @@ export function Layout() {
 
   return (
     <div className="app-layout">
-      <header className="app-header">
-        <div className="brand">SistemaGrido — Admin</div>
+      <aside className="app-sidebar">
+        <div className="brand">SistemaGrido</div>
         <nav>
           <Link to="/">Inicio</Link>
           {user?.roleCode === 'ADMIN' && (
@@ -33,7 +33,7 @@ export function Layout() {
             Salir
           </button>
         </div>
-      </header>
+      </aside>
       <main className="app-main">
         <Outlet />
       </main>
