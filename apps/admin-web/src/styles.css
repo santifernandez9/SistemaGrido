@@ -1,10 +1,42 @@
+/*
+ * Rediseño visual (sin tocar ningún componente): FORMA de Starlink.com
+ * (tipografía grande y en negrita, mucho espacio en blanco, botones tipo
+ * píldora, tarjetas redondeadas con sombra suave) -- pero con los colores
+ * reales de Grido (rosa/magenta sobre fondo claro), nunca el tema oscuro de
+ * Starlink. Todos los selectores existentes se mantienen -- sólo cambian
+ * los valores.
+ */
+
 :root {
   color-scheme: light;
   font-family:
+    'Inter',
     system-ui,
     -apple-system,
     'Segoe UI',
     sans-serif;
+
+  /* Paleta -- rosa/magenta de Grido sobre fondo claro */
+  --color-bg: #f6f6f8;
+  --color-surface: #ffffff;
+  --color-text: #1a1a1f;
+  --color-text-dim: #6b6b76;
+  --color-border: #e6e6eb;
+
+  --color-primary: #ec1c6e;
+  --color-primary-dark: #c41259;
+  --color-primary-light: #ff5fa8;
+  --color-primary-contrast: #ffffff;
+  --color-primary-tint: #fde8f1;
+
+  /* Radios/sombras -- píldoras para botones, tarjetas bien redondeadas */
+  --radius-sm: 8px;
+  --radius-md: 14px;
+  --radius-lg: 22px;
+  --radius-pill: 999px;
+
+  --shadow-sm: 0 1px 2px rgba(10, 10, 15, 0.06);
+  --shadow-md: 0 10px 30px rgba(10, 10, 15, 0.1);
 }
 
 * {
@@ -13,8 +45,9 @@
 
 body {
   margin: 0;
-  background: #f5f6f8;
-  color: #0b1d33;
+  background: var(--color-bg);
+  color: var(--color-text);
+  -webkit-font-smoothing: antialiased;
 }
 
 .app-layout {
@@ -26,34 +59,88 @@ body {
 .app-header {
   display: flex;
   align-items: center;
-  gap: 24px;
-  padding: 12px 20px;
-  background: #0b1d33;
+  gap: 28px;
+  padding: 16px 28px;
+  background: var(--color-primary);
   color: #fff;
+}
+
+.app-header .brand {
+  font-weight: 800;
+  font-size: 16px;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
 }
 
 .app-header nav {
   display: flex;
-  gap: 12px;
+  gap: 4px;
   flex: 1;
+  flex-wrap: wrap;
 }
 
 .app-header a {
-  color: #fff;
+  color: rgba(255, 255, 255, 0.8);
   text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  padding: 8px 12px;
+  border-radius: var(--radius-pill);
+  transition:
+    color 0.15s ease,
+    background-color 0.15s ease;
+}
+
+.app-header a:hover {
+  color: var(--color-primary);
+  background: #fff;
+}
+
+.app-header a.active,
+.app-header a[aria-current='page'] {
+  color: var(--color-primary);
+  background: #fff;
 }
 
 .who {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.who button {
+  margin-top: 0;
+  background: transparent;
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  padding: 7px 16px;
+}
+
+.who button:hover {
+  background: rgba(255, 255, 255, 0.15);
 }
 
 .app-main {
-  padding: 24px;
-  max-width: 960px;
+  padding: 32px 24px 64px;
+  max-width: 1000px;
   margin: 0 auto;
   width: 100%;
+}
+
+.app-main h1 {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin-bottom: 4px;
+}
+
+.app-main h2 {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
 .login-page {
@@ -61,25 +148,39 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
+  background: radial-gradient(circle at 20% 15%, var(--color-primary-tint), var(--color-bg) 55%);
+  padding: 24px;
 }
 
 .login-form {
-  background: #fff;
-  padding: 32px;
-  border-radius: 12px;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+  background: var(--color-surface);
+  padding: 40px 36px;
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+  border: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   min-width: 320px;
+  width: 100%;
+  max-width: 380px;
+}
+
+.login-form h1 {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  margin: 0 0 4px;
+  color: var(--color-primary);
 }
 
 .card {
-  background: #fff;
-  padding: 20px;
-  border-radius: 10px;
+  background: var(--color-surface);
+  padding: 24px;
+  border-radius: var(--radius-lg);
   margin-bottom: 20px;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  box-shadow: var(--shadow-sm);
+  border: 1px solid var(--color-border);
 }
 
 .invite-form {
@@ -89,25 +190,54 @@ body {
   max-width: 420px;
 }
 
+label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-dim);
+}
+
 input,
 select,
 button {
-  padding: 8px 10px;
+  padding: 10px 14px;
   font-size: 14px;
-  border-radius: 6px;
-  border: 1px solid #ccc;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-border);
+  font-family: inherit;
+}
+
+input:focus,
+select:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px var(--color-primary-tint);
 }
 
 button {
   cursor: pointer;
-  background: #0b1d33;
-  color: #fff;
+  background: var(--color-primary);
+  color: var(--color-primary-contrast);
   border: none;
   margin-top: 8px;
+  font-weight: 700;
+  border-radius: var(--radius-pill);
+  padding: 11px 22px;
+  letter-spacing: 0.01em;
+  transition:
+    background-color 0.15s ease,
+    transform 0.1s ease;
+}
+
+button:hover:not(:disabled) {
+  background: var(--color-primary-dark);
+}
+
+button:active:not(:disabled) {
+  transform: scale(0.98);
 }
 
 button:disabled {
-  opacity: 0.6;
+  opacity: 0.55;
   cursor: not-allowed;
 }
 
@@ -119,17 +249,26 @@ table {
 th,
 td {
   text-align: left;
-  padding: 8px;
-  border-bottom: 1px solid #eee;
+  padding: 10px 8px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+th {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-dim);
+  font-weight: 700;
 }
 
 .error {
-  color: #b3261e;
+  color: #c41259;
   font-size: 13px;
+  font-weight: 600;
 }
 
 .muted {
-  color: #666;
+  color: var(--color-text-dim);
 }
 
 .error-boundary,
@@ -160,9 +299,14 @@ td {
 
 button.secondary {
   background: #fff;
-  color: #0b1d33;
-  border: 1px solid #ccc;
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
   margin-top: 0;
+}
+
+button.secondary:hover:not(:disabled) {
+  background: var(--color-bg);
+  border-color: var(--color-text-dim);
 }
 
 .list-toolbar {
@@ -170,7 +314,7 @@ button.secondary {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-  margin-bottom: 12px;
+  margin-bottom: 16px;
 }
 
 .list-toolbar h2 {
@@ -190,10 +334,11 @@ button.secondary {
 
 .badge {
   display: inline-block;
-  padding: 2px 8px;
-  border-radius: 999px;
+  padding: 3px 10px;
+  border-radius: var(--radius-pill);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 700;
+  letter-spacing: 0.01em;
 }
 
 .badge-ok {
@@ -202,12 +347,12 @@ button.secondary {
 }
 
 .badge-off {
-  background: #f2f2f2;
+  background: #f2f2f4;
   color: #777;
 }
 
 .empty-state {
-  color: #666;
+  color: var(--color-text-dim);
   font-style: italic;
   padding: 16px 0;
 }
@@ -215,8 +360,8 @@ button.secondary {
 /* Etapa 3 — motor de inventario */
 
 .badge-warn {
-  background: #fdecea;
-  color: #b3261e;
+  background: var(--color-primary-tint);
+  color: var(--color-primary-dark);
 }
 
 .filters {
@@ -235,8 +380,8 @@ button.secondary {
 }
 
 .negative-quantity {
-  color: #b3261e;
-  font-weight: 600;
+  color: var(--color-primary-dark);
+  font-weight: 700;
 }
 
 .pagination {
@@ -251,13 +396,13 @@ button.secondary {
 }
 
 .movement-row:hover {
-  background: #fafafa;
+  background: var(--color-bg);
 }
 
 .detail-panel {
   margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px solid #e5e5e5;
+  border-top: 1px solid var(--color-border);
 }
 
 .detail-grid {
@@ -269,7 +414,7 @@ button.secondary {
 
 .detail-grid dt {
   font-size: 12px;
-  color: #666;
+  color: var(--color-text-dim);
   text-transform: uppercase;
   letter-spacing: 0.02em;
 }
@@ -282,5 +427,5 @@ button.secondary {
 .mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;
-  color: #666;
+  color: var(--color-text-dim);
 }
