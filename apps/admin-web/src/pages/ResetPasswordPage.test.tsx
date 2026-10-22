@@ -123,6 +123,24 @@ describe('ResetPasswordPage', () => {
     expect(apiGet).not.toHaveBeenCalled();
   });
 
+  it('F) muestra éxito SIN esperar a signOut -- un backend lento/dormido (Render free) nunca debe colgar la confirmación', async () => {
+    updatePassword.mockResolvedValueOnce(undefined);
+    // Nunca se resuelve -- simula un backend caído/dormido que tarda
+    // indefinidamente en responder (el bug real: Render free-tier cold
+    // start sin timeout en el cliente HTTP).
+    signOut.mockImplementation(() => new Promise(() => {}));
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.type(screen.getByLabelText('Nueva contraseña'), 'contrasenaSegura1');
+    await user.type(screen.getByLabelText('Confirmar nueva contraseña'), 'contrasenaSegura1');
+    await user.click(screen.getByRole('button', { name: /guardar nueva contraseña/i }));
+
+    // La contraseña YA se guardó (updatePassword resolvió) -- el éxito se
+    // muestra de inmediato, sin depender de que signOut termine.
+    expect(await screen.findByText(/actualizada correctamente/i)).toBeInTheDocument();
+  });
+
   it('muestra un aviso, sin formulario, cuando no hay una sesión de recuperación válida (evita loop con /login)', () => {
     mockPasswordRecovery = false;
     renderPage();

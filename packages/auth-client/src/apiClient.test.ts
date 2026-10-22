@@ -76,4 +76,27 @@ describe('createApiClient', () => {
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
     expect(init.headers).not.toHaveProperty('Authorization');
   });
+
+  it('aborta con un ApiClientError(TIMEOUT) si el backend no responde a tiempo -- nunca se queda colgado indefinidamente (bug real: Render free-tier dormido + ResetPasswordPage)', async () => {
+    vi.useFakeTimers();
+    // `fetch` real rechaza con AbortError cuando se dispara la señal que le
+    // pasamos -- este mock reproduce exactamente ese contrato en vez de
+    // quedarse "colgado" sin más (lo cual no probaría nada del timeout).
+    fetchMock.mockImplementation(
+      (_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init.signal?.addEventListener('abort', () => {
+            reject(new DOMException('Aborted', 'AbortError'));
+          });
+        }),
+    );
+    const api = createApiClient({ baseUrl: 'https://api.test', supabase: fakeSupabase(null) });
+
+    const pending = api.get('/api/me');
+    const assertion = expect(pending).rejects.toMatchObject({ code: 'TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(45_000);
+    await assertion;
+
+    vi.useRealTimers();
+  });
 });
