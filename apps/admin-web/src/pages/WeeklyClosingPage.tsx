@@ -111,7 +111,18 @@ export function WeeklyClosingPage() {
           </label>
           <label>
             Cualquier día de la semana a cerrar
-            <input type="date" value={weekDate} onChange={(e) => setWeekDate(e.target.value)} />
+            <input
+              type="date"
+              value={weekDate}
+              // Un input de fecha nativo se puede dejar vacío (botón "x" del
+              // navegador, borrar todo a mano) -- `mondayOf('')` rompería el
+              // cálculo de `periodStart`. Se ignora ese valor transitorio y
+              // se conserva la última fecha válida en vez de romper la
+              // pantalla.
+              onChange={(e) => {
+                if (e.target.value) setWeekDate(e.target.value);
+              }}
+            />
           </label>
           <p className="muted">
             Semana: {periodStart} (lunes) — {periodEndOf(periodStart)} (domingo)
