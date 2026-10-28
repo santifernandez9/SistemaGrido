@@ -1,10 +1,18 @@
+import { Link } from 'react-router-dom';
 import { useAuth } from '@sistema-grido/auth-client';
 
+const ACTIONS = [
+  { to: '/conteo', label: 'Conteo', icon: '🧮' },
+  { to: '/merma', label: 'Merma', icon: '🗑️' },
+  { to: '/baja-lata', label: 'Baja de lata', icon: '🥫' },
+  { to: '/gasto', label: 'Gasto', icon: '💸' },
+  { to: '/sin-stock', label: 'Sin stock', icon: '⚠️' },
+];
+
 /**
- * Pantalla inicial neutra (Etapa 2, sección 18: "no simular funcionalidades
- * inexistentes"). Las pantallas operativas reales de esta app (conteo, mermas,
- * baja de lata, gasto, sin stock) son de una etapa futura -- acá sólo se confirma
- * que la sesión funciona de punta a punta y se ve la sucursal asignada.
+ * Home operativa (Etapa 4, sección 14 del prompt): "botones grandes de
+ * acceso a cada acción... sin tablas de escritorio, sin formularios
+ * innecesariamente largos". Cinco capacidades, ni una más.
  */
 export function HomePage() {
   const { user } = useAuth();
@@ -15,11 +23,16 @@ export function HomePage() {
       {user?.defaultLocationName && (
         <p className="location-badge">Sucursal: {user.defaultLocationName}</p>
       )}
-      <p className="muted">
-        Todavía no hay pantallas operativas cargadas acá (conteo, mermas, bajas de lata, etc.) —
-        esta es la base de Catálogo y Maestros (Etapa 2). Las pantallas de trabajo diario llegan en
-        una etapa posterior, calcadas de la planilla de papel real.
-      </p>
+      <div className="action-grid">
+        {ACTIONS.map((action) => (
+          <Link key={action.to} to={action.to} className="big-button">
+            <span className="big-button-icon" aria-hidden="true">
+              {action.icon}
+            </span>
+            <span>{action.label}</span>
+          </Link>
+        ))}
+      </div>
     </div>
   );
 }

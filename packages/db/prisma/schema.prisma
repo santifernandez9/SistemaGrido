@@ -62,15 +62,35 @@ model Organization {
   timezone  String   @default("America/Argentina/Cordoba")
   createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  locations          Location[]
-  users              AppUser[]
-  auditLogs          AuditLog[]
-  categories         Category[]
-  productTypes       ProductType[]
-  unitsOfMeasure     UnitOfMeasure[]
-  flavors            Flavor[]
-  products           Product[]
-  inventoryMovements InventoryMovement[]
+  locations                     Location[]
+  users                         AppUser[]
+  auditLogs                     AuditLog[]
+  categories                    Category[]
+  productTypes                  ProductType[]
+  unitsOfMeasure                UnitOfMeasure[]
+  flavors                       Flavor[]
+  products                      Product[]
+  inventoryMovements            InventoryMovement[]
+  inventoryCounts               InventoryCount[]
+  inventoryCountItems           InventoryCountItem[]
+  wastes                        Waste[]
+  variableExpenses              VariableExpense[]
+  stockoutEvents                StockoutEvent[]
+  salesImports                  SalesImport[]
+  salesImportRows               SalesImportRow[]
+  sales                         Sale[]
+  productAliases                ProductAlias[]
+  billOfMaterialItems           BillOfMaterialItem[]
+  weeklyClosings                WeeklyClosing[]
+  inventorySnapshotItems        InventorySnapshotItem[]
+  priceListImports              PriceListImport[]
+  priceListImportRows           PriceListImportRow[]
+  priceReferences               PriceReference[]
+  priceValues                   PriceValue[]
+  priceReferenceProductMappings PriceReferenceProductMapping[]
+  inventoryCountTypoCandidates  InventoryCountTypoCandidate[]
+  generalWeeklyClosings         GeneralWeeklyClosing[]
+  productCountingPresentations  ProductCountingPresentation[]
 
   @@map("organization")
 }
@@ -83,10 +103,17 @@ model Location {
   active         Boolean      @default(true)
   createdAt      DateTime     @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  users              AppUser[]
-  auditLogs          AuditLog[]
-  inventoryMovements InventoryMovement[]
+  organization           Organization            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  users                  AppUser[]
+  auditLogs              AuditLog[]
+  inventoryMovements     InventoryMovement[]
+  inventoryCounts        InventoryCount[]
+  variableExpenses       VariableExpense[]
+  stockoutEvents         StockoutEvent[]
+  salesImports           SalesImport[]
+  sales                  Sale[]
+  weeklyClosings         WeeklyClosing[]
+  inventorySnapshotItems InventorySnapshotItem[]
 
   @@unique([organizationId, name])
   /// Habilita FKs compuestas (organizationId, locationId) desde AppUser,
@@ -111,27 +138,27 @@ model Role {
 /// sección 18.2, Opción A). Una fila = una persona física con cuenta propia en
 /// Supabase Auth. Nunca una cuenta compartida por rol/ubicación como identidad principal.
 model AppUser {
-  id                String    @id @default(uuid()) @db.Uuid
-  organizationId    String    @map("organization_id") @db.Uuid
-  roleId            String    @map("role_id") @db.Uuid
+  id                String   @id @default(uuid()) @db.Uuid
+  organizationId    String   @map("organization_id") @db.Uuid
+  roleId            String   @map("role_id") @db.Uuid
   /// Ubicación asignada. NULL para ADMIN (acceso a toda la organización) — ver
   /// docs/ETAPA-0-ANALISIS-ARQUITECTURA.md sección 7 (actores y permisos).
-  defaultLocationId String?   @map("default_location_id") @db.Uuid
-  displayName       String    @map("display_name")
+  defaultLocationId String?  @map("default_location_id") @db.Uuid
+  displayName       String   @map("display_name")
   /// Email de contacto/invitación. Campo agregado en Etapa 1 (no estaba en el
   /// sketch de Etapa 0): es una necesidad técnica del flujo de alta de usuarios
   /// vía Supabase Auth (invitación por email), no un requisito de negocio nuevo.
   /// Ver docs/ETAPA-1-BASE-CORE.md, sección "Desviaciones respecto de Etapa 0".
-  email             String    @unique
+  email             String   @unique
   /// id del usuario en Supabase Auth (auth.users.id). Es lo que llega en el JWT
   /// verificado por el backend en cada request.
-  authSubject       String    @unique @map("auth_subject")
-  active            Boolean   @default(true)
-  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt         DateTime  @updatedAt @map("updated_at") @db.Timestamptz(6)
+  authSubject       String   @unique @map("auth_subject")
+  active            Boolean  @default(true)
+  createdAt         DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt         DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
-  role         Role         @relation(fields: [roleId], references: [id], onDelete: Restrict)
+  organization                           Organization                   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  role                                   Role                           @relation(fields: [roleId], references: [id], onDelete: Restrict)
   /// FK compuesta (organizationId, defaultLocationId) -> Location(organizationId, id):
   /// pendiente detectado en Etapa 2.1 (docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md,
   /// sección 14), corregido acá porque Etapa 3 ya necesita tocar AppUser/Location
@@ -142,15 +169,42 @@ model AppUser {
   /// Prisma lo señala como advertencia de esquema inválido. `Restrict` es
   /// coherente con el resto del esquema y con que `Location` nunca se borra
   /// físicamente (baja lógica vía `active`, Etapa 2).
-  defaultLocation    Location?           @relation(fields: [organizationId, defaultLocationId], references: [organizationId, id], onDelete: Restrict)
-  auditLogs          AuditLog[]
-  inventoryMovements InventoryMovement[]
+  defaultLocation                        Location?                      @relation(fields: [organizationId, defaultLocationId], references: [organizationId, id], onDelete: Restrict)
+  auditLogs                              AuditLog[]
+  inventoryMovements                     InventoryMovement[]
+  inventoryCounts                        InventoryCount[]
+  variableExpenses                       VariableExpense[]
+  stockoutEvents                         StockoutEvent[]
+  /// Etapa 5 -- dos relaciones nombradas hacia AppUser porque un import
+  /// distingue quién lo subió de quién lo confirmó (pueden ser personas
+  /// distintas).
+  salesImportsCreated                    SalesImport[]                  @relation("SalesImportCreatedBy")
+  salesImportsConfirmed                  SalesImport[]                  @relation("SalesImportConfirmedBy")
+  sales                                  Sale[]
+  productAliasesConfirmed                ProductAlias[]
+  /// Etapa 6 -- cuatro relaciones nombradas: quien preparó/creó el cierre,
+  /// quien confirmó haber revisado el checklist, quien lo cerró
+  /// definitivamente y quien lo reabrió pueden ser personas distintas
+  /// (igual criterio que SalesImportCreatedBy/ConfirmedBy).
+  weeklyClosingsCreated                  WeeklyClosing[]                @relation("WeeklyClosingCreatedBy")
+  weeklyClosingsReviewConfirmed          WeeklyClosing[]                @relation("WeeklyClosingReviewConfirmedBy")
+  weeklyClosingsClosed                   WeeklyClosing[]                @relation("WeeklyClosingClosedBy")
+  weeklyClosingsReopened                 WeeklyClosing[]                @relation("WeeklyClosingReopenedBy")
+  /// Etapa 6.2 -- mismo criterio que SalesImport: quien sube el archivo de
+  /// precios/costos puede no ser quien confirma su importación.
+  priceListImportsCreated                PriceListImport[]              @relation("PriceListImportCreatedBy")
+  priceListImportsConfirmed              PriceListImport[]              @relation("PriceListImportConfirmedBy")
+  priceValuesCreated                     PriceValue[]
+  priceReferenceProductMappingsConfirmed PriceReferenceProductMapping[]
+  differenceResolutions                  InventoryCountItem[]
+  typoCandidatesResolved                 InventoryCountTypoCandidate[]
+  generalWeeklyClosingsClosed            GeneralWeeklyClosing[]
 
-  @@index([organizationId])
-  @@index([roleId])
   /// Habilita FKs compuestas (organizationId, userId) desde AuditLog e
   /// InventoryMovement (createdBy) — Etapa 3.
   @@unique([organizationId, id])
+  @@index([organizationId])
+  @@index([roleId])
   @@map("app_user")
 }
 
@@ -185,8 +239,8 @@ model AuditLog {
   /// no exige la FK cuando lo son (evento de sistema sin actor/ubicación).
   /// `onDelete: Restrict` por el mismo motivo que en AppUser.defaultLocation
   /// (SetNull es inválido en una FK compuesta con organizationId NOT NULL).
-  user     AppUser?  @relation(fields: [organizationId, userId], references: [organizationId, id], onDelete: Restrict)
-  location Location? @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  user         AppUser?     @relation(fields: [organizationId, userId], references: [organizationId, id], onDelete: Restrict)
+  location     Location?    @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
 
   @@index([organizationId, entityType, entityId])
   @@index([organizationId, occurredAt])
@@ -284,6 +338,10 @@ model UnitOfMeasure {
   organization       Organization        @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   products           Product[]
   inventoryMovements InventoryMovement[]
+  /// Etapa 6.2.2 -- una unidad de manejo puede ser, además, la presentación
+  /// de conteo de uno o más productos (ej. "Caja" como presentación de un
+  /// producto que se maneja normalmente en "Unidad").
+  countingPresentations ProductCountingPresentation[]
 
   @@unique([organizationId, code])
   /// Habilita la FK compuesta (organizationId, unitOfMeasureId) en Product — Etapa 2.1.
@@ -329,42 +387,60 @@ model Flavor {
 /// explícitamente fuera de Etapa 2), BOM (RF-007, fuera de Etapa 2), stock
 /// mínimo/ideal (pertenece al motor de inventario, fuera de Etapa 2).
 model Product {
-  id              String   @id @default(uuid()) @db.Uuid
-  organizationId  String   @map("organization_id") @db.Uuid
+  id                   String   @id @default(uuid()) @db.Uuid
+  organizationId       String   @map("organization_id") @db.Uuid
   /// Código de negocio legible, opcional (RF-001: la clave real es el `id`
   /// UUID; este campo es sólo una referencia humana, como la que ya usa el
   /// sistema actual -- p. ej. "P001"). Único por organización cuando se define;
   /// Postgres permite múltiples NULL en una constraint UNIQUE, así que un
   /// producto sin código no colisiona con otro.
-  code            String?
-  name            String
-  categoryId      String   @map("category_id") @db.Uuid
-  productTypeId   String   @map("product_type_id") @db.Uuid
-  unitOfMeasureId String   @map("unit_of_measure_id") @db.Uuid
+  code                 String?
+  name                 String
+  categoryId           String   @map("category_id") @db.Uuid
+  productTypeId        String   @map("product_type_id") @db.Uuid
+  unitOfMeasureId      String   @map("unit_of_measure_id") @db.Uuid
   /// Equivalencia/factor de conversión del producto (RF-002 "unidades por
   /// presentación"; RN-006 "factor de conversión del producto", singular):
   /// cuántas unidades sueltas contiene la unidad de manejo de este producto.
   /// 1 cuando la unidad de manejo ya es la unidad mínima (ej. LATA, UNIDAD).
-  unitsPerHandlingUnit Int  @default(1) @map("units_per_handling_unit")
+  unitsPerHandlingUnit Int      @default(1) @map("units_per_handling_unit")
   /// Sabor asociado, sólo para productos que lo tienen (RF-003). NULL para
   /// insumos, packaging, etc.
-  flavorId        String?  @map("flavor_id") @db.Uuid
-  active          Boolean  @default(true)
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
-  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+  flavorId             String?  @map("flavor_id") @db.Uuid
+  active               Boolean  @default(true)
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt            DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
 
-  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  organization                  Organization                   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   /// FKs compuestas (organizationId, xId) -> Master(organizationId, id) en las
   /// cuatro relaciones de abajo: garantizan en PostgreSQL que un producto no
   /// pueda referenciar una categoría/tipo/unidad/sabor de otra organización,
   /// además de la validación ya existente en el backend (Etapa 2.1 — ver
   /// docs/ETAPA-2.1-INTEGRIDAD-MULTIORGANIZACION.md). flavorId es nullable:
   /// Postgres no exige la FK cuando es NULL (producto sin sabor).
-  category      Category      @relation(fields: [organizationId, categoryId], references: [organizationId, id], onDelete: Restrict)
-  productType   ProductType   @relation(fields: [organizationId, productTypeId], references: [organizationId, id], onDelete: Restrict)
-  unitOfMeasure UnitOfMeasure @relation(fields: [organizationId, unitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
-  flavor        Flavor?       @relation(fields: [organizationId, flavorId], references: [organizationId, id], onDelete: Restrict)
-  inventoryMovements InventoryMovement[]
+  category                      Category                       @relation(fields: [organizationId, categoryId], references: [organizationId, id], onDelete: Restrict)
+  productType                   ProductType                    @relation(fields: [organizationId, productTypeId], references: [organizationId, id], onDelete: Restrict)
+  unitOfMeasure                 UnitOfMeasure                  @relation(fields: [organizationId, unitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
+  flavor                        Flavor?                        @relation(fields: [organizationId, flavorId], references: [organizationId, id], onDelete: Restrict)
+  inventoryMovements            InventoryMovement[]
+  inventoryCountItems           InventoryCountItem[]
+  stockoutEvents                StockoutEvent[]
+  sales                         Sale[]
+  productAliases                ProductAlias[]
+  inventorySnapshotItems        InventorySnapshotItem[]
+  /// Etapa 5 -- dos relaciones nombradas: un producto puede aparecer tanto
+  /// como el producto VENDIDO de una receta (BomProduct) como el INSUMO
+  /// consumido por la receta de otro producto (BomComponent).
+  bomItemsAsProduct             BillOfMaterialItem[]           @relation("BomProduct")
+  bomItemsAsComponent           BillOfMaterialItem[]           @relation("BomComponent")
+  /// Etapa 6.2 -- mapeos de referencia de precio/costo Grido confirmados
+  /// para este producto (a lo sumo uno activo por `priceType`).
+  priceReferenceProductMappings PriceReferenceProductMapping[]
+  /// Etapa 6.2.2 -- presentaciones físicas de conteo configuradas para este
+  /// producto (Unidad/Caja/Pack, sección 14/15 del prompt). Vacío = el
+  /// producto sigue contándose con `unitOfMeasureId`/`unitsPerHandlingUnit`
+  /// tal cual (compatibilidad total, sección 16).
+  countingPresentations         ProductCountingPresentation[]
 
   @@unique([organizationId, code])
   /// Habilita la FK compuesta (organizationId, productId) desde InventoryMovement — Etapa 3.
@@ -440,11 +516,11 @@ enum MovementStatus {
 /// CONFIRMADO). Única puerta de escritura de stock del sistema — ver
 /// apps/api/src/services/inventory-ledger.ts.
 model InventoryMovement {
-  id             String         @id @default(uuid()) @db.Uuid
-  organizationId String         @map("organization_id") @db.Uuid
-  locationId     String         @map("location_id") @db.Uuid
-  productId      String         @map("product_id") @db.Uuid
-  movementType   MovementType   @map("movement_type")
+  id             String       @id @default(uuid()) @db.Uuid
+  organizationId String       @map("organization_id") @db.Uuid
+  locationId     String       @map("location_id") @db.Uuid
+  productId      String       @map("product_id") @db.Uuid
+  movementType   MovementType @map("movement_type")
 
   /// Cantidad normalizada a la unidad canónica del producto ("unidades
   /// sueltas", el mismo concepto que `Product.unitsPerHandlingUnit` ya usa
@@ -527,18 +603,29 @@ model InventoryMovement {
   /// sección 19 del prompt, P-001 ya resuelto). FK compuesta multi-organización.
   createdById String @map("created_by") @db.Uuid
 
-  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  organization           Organization            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
   /// FKs compuestas (organizationId, x) -> Master(organizationId, id):
   /// aplica a este ledger lo aprendido en Etapa 2.1 -- ningún movimiento
   /// puede referenciar una ubicación, producto, unidad, usuario u otro
   /// movimiento de una organización distinta. Ver "Multi-organización" en
   /// docs/ETAPA-3-MOTOR-INVENTARIO.md.
-  location            Location           @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
-  product              Product            @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
-  entryUnitOfMeasure   UnitOfMeasure      @relation(fields: [organizationId, entryUnitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
-  createdBy            AppUser            @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
-  reversesMovement     InventoryMovement? @relation("MovementReversal", fields: [organizationId, reversesMovementId], references: [organizationId, id], onDelete: Restrict)
-  reversedByMovements  InventoryMovement[] @relation("MovementReversal")
+  location               Location                @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  product                Product                 @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  entryUnitOfMeasure     UnitOfMeasure           @relation(fields: [organizationId, entryUnitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
+  createdBy              AppUser                 @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+  reversesMovement       InventoryMovement?      @relation("MovementReversal", fields: [organizationId, reversesMovementId], references: [organizationId, id], onDelete: Restrict)
+  reversedByMovements    InventoryMovement[]     @relation("MovementReversal")
+  /// Presente sólo cuando `movementType = WASTE` y se originó desde la
+  /// pantalla de mermas de Etapa 4 (ver modelo `Waste` más abajo).
+  waste                  Waste?
+  /// Presente sólo cuando `movementType = COUNT_CORRECTION` y se originó
+  /// desde un cierre semanal de Etapa 6 (ver `InventorySnapshotItem` más
+  /// abajo). Etapa 6.1: relación 1-a-MUCHOS, no 1-a-1 -- un mismo
+  /// movimiento de corrección puede quedar referenciado por más de una
+  /// `InventorySnapshotItem` (una por cada revisión del `WeeklyClosing`
+  /// que reutiliza la corrección ya aplicada en vez de duplicarla, ver
+  /// `closeWeeklyClosing`).
+  inventorySnapshotItems InventorySnapshotItem[]
 
   @@unique([organizationId, id])
   /// Idempotencia (sección 14 del prompt): un mismo evento externo (mismo
@@ -567,4 +654,1337 @@ model InventoryMovement {
   @@index([organizationId, sourceDocumentType, sourceDocumentId])
   @@index([organizationId, movementType])
   @@map("inventory_movement")
+}
+
+// ---------------------------------------------------------------------------
+// App Heladería Operativa (Etapa 4) — ver docs/ETAPA-4-APP-HELADERIA.md.
+//
+// Consume el ledger de Etapa 3 sin reabrirlo: el conteo, la baja de lata, la
+// merma y el evento de sin-stock generan (o comparan contra) InventoryMovement
+// existentes -- ninguno de los modelos de acá abajo duplica lo que el ledger
+// ya resuelve (RF-009..RF-026, RN-007..RN-033, Doc §15-§20). "Dar de baja
+// lata" en particular NO tiene tabla propia: es un InventoryMovement
+// ICE_CREAM_CONTAINER_CLOSE más (ver `closeIceCreamContainer` en
+// apps/api/src/services/inventory-ledger.ts) -- sección 7 del prompt de
+// Etapa 4 sólo pide los mismos campos que ya tiene cualquier movimiento.
+//
+// Gasto variable NO es parte del ledger de inventario (sección 9 del prompt:
+// "este módulo NO forma parte del ledger de inventario") -- tiene su propia
+// entidad/transacción, sin relación con InventoryMovement.
+
+/// Estado del conteo físico semanal (RF-012/RN-012..018, sección 1 del prompt
+/// de Etapa 4). Nombres tomados literalmente del prompt vigente de Etapa 4 en
+/// vez de los sugeridos en la propuesta conceptual original de Etapa 0
+/// (`RECOUNT_REQUESTED`/`CLOSED`) -- documentado como decisión explícita en
+/// docs/ETAPA-4-APP-HELADERIA.md: `COMPLETED` evita confundirse con el futuro
+/// `weekly_closing.status = CLOSED` (Etapa 6), que es un concepto distinto
+/// (cierre semanal administrativo, fuera de alcance acá).
+///
+/// `DRAFT` se declara por completitud del dominio pero, en esta etapa, NUNCA
+/// se persiste una fila en ese estado: el conteo se arma enteramente en el
+/// dispositivo (IndexedDB, RF-013) y sólo llega al backend ya armado, vía
+/// `POST /api/shop/counts`, que lo crea directamente en `SUBMITTED` y lo hace
+/// avanzar en la misma transacción a `RECOUNT_REQUIRED` o `COMPLETED` según
+/// corresponda -- ver la sección "Autoguardado" de
+/// docs/ETAPA-4-APP-HELADERIA.md sobre por qué no existe un endpoint de
+/// "guardar borrador en el servidor".
+enum InventoryCountStatus {
+  DRAFT
+  SUBMITTED
+  RECOUNT_REQUIRED
+  COMPLETED
+
+  @@map("inventory_count_status")
+}
+
+/// Fracción estimada del contenido de una lata abierta (RF-020/RN-025,
+/// CONFIRMADO textualmente por el cliente: "llena, 3/4, 1/2, 1/4, casi
+/// vacía"). Reemplaza el pesaje real con balanza del sistema anterior
+/// (`Pesajes.gs`) -- explícitamente NO requerido por el documento del
+/// cliente (ver docs/ETAPA-0-ANALISIS-ARQUITECTURA.md, nota sobre pesajes
+/// bajo RF-023). Se reutiliza también en `Waste` cuando una merma se
+/// registra como fracción de una lata en vez de cantidad exacta (sección 8
+/// del prompt: "cantidad O FRACCIÓN").
+enum OpenContainerFraction {
+  FULL
+  THREE_QUARTERS
+  HALF
+  QUARTER
+  NEARLY_EMPTY
+
+  @@map("open_container_fraction")
+}
+
+/// Conteo físico semanal, ciego, por ubicación (RF-012, Doc §15). Un conteo
+/// por (ubicación, semana) -- `weekStart` lo calcula el frontend (el lunes
+/// de la semana en curso, hora local del dispositivo) y se manda explícito,
+/// mismo patrón que `occurredAt` ya usa el ledger desde Etapa 3: no se le
+/// exige al servidor adivinar en qué huso horario "hoy es lunes".
+model InventoryCount {
+  id             String               @id @default(uuid()) @db.Uuid
+  organizationId String               @map("organization_id") @db.Uuid
+  locationId     String               @map("location_id") @db.Uuid
+  weekStart      DateTime             @map("week_start") @db.Date
+  status         InventoryCountStatus @default(SUBMITTED)
+
+  submittedAt DateTime  @default(now()) @map("submitted_at") @db.Timestamptz(6)
+  /// Cuándo el reconteo (si hizo falta) quedó confirmado -- distinto de
+  /// `submittedAt`, que es el envío ORIGINAL (sección 5/6 del prompt:
+  /// conservar la diferencia original, no sólo la final).
+  recountedAt DateTime? @map("recounted_at") @db.Timestamptz(6)
+  completedAt DateTime? @map("completed_at") @db.Timestamptz(6)
+  createdAt   DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  createdById String @map("created_by") @db.Uuid
+
+  /// Idempotencia del envío original (sección 12 del prompt: "conteos...
+  /// pueden reenviarse después de cortes de conexión"). Obligatoria acá (a
+  /// diferencia de `InventoryMovement.idempotencyKey`, opcional): el origen
+  /// es siempre una PWA con conectividad intermitente, nunca una carga
+  /// manual de escritorio.
+  idempotencyKey         String @map("idempotency_key")
+  idempotencyFingerprint String @map("idempotency_fingerprint")
+
+  /// Idempotencia del RECONTEO (Etapa 4.1, sección 2/3 -- corrige que dos
+  /// requests concurrentes representando el mismo reconteo pudieran
+  /// resolver en 2xx/409 en vez de 2xx/2xx). Columnas separadas de
+  /// `idempotencyKey`/`idempotencyFingerprint` de arriba (esas son del
+  /// envío ORIGINAL del conteo, una operación distinta) -- nunca se
+  /// reutiliza ambiguamente una clave para dos operaciones diferentes.
+  /// NULL hasta que este conteo efectivamente pase por un reconteo (a lo
+  /// sumo una ronda adicional, sección 5 del prompt original).
+  recountIdempotencyKey         String? @map("recount_idempotency_key")
+  recountIdempotencyFingerprint String? @map("recount_idempotency_fingerprint")
+
+  organization   Organization                  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location       Location                      @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  createdBy      AppUser                       @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+  items          InventoryCountItem[]
+  typoCandidates InventoryCountTypoCandidate[]
+
+  /// Habilita la FK compuesta (organizationId, countId) desde
+  /// InventoryCountItem.
+  @@unique([organizationId, id])
+  /// A lo sumo un conteo por ubicación y semana (mismo criterio que la
+  /// propuesta conceptual de Etapa 0, sección 10.4, sin el discriminador
+  /// `kind` -- INITIAL_STOCK ya tiene su propio mecanismo en Etapa 3 y no se
+  /// duplica acá).
+  @@unique([organizationId, locationId, weekStart])
+  @@unique([organizationId, idempotencyKey])
+  /// NULLs no colisionan entre sí en un índice único de Postgres, así que
+  /// esto sólo restringe reutilizar la misma clave de RECONTEO en dos
+  /// conteos distintos -- no afecta a los conteos que todavía no tuvieron
+  /// ningún reconteo.
+  @@unique([organizationId, recountIdempotencyKey])
+  @@index([organizationId, locationId, weekStart])
+  @@map("inventory_count")
+}
+
+/// Línea de conteo por producto (RF-020, Doc §10.4 `stock_count_line`).
+/// `closedUnits`/`openUnits`/`openFraction` sirven a los DOS modos de
+/// captura de la sección 3/4 del prompt con los mismos tres campos, sin
+/// discriminador de tipo explícito -- exactamente el diseño conceptual ya
+/// confirmado por el cliente en Etapa 0:
+///  - producto cerrado ("2 cajas + 5 unidades"): `closedUnits` = cajas
+///    cerradas, `openUnits` = unidades sueltas (conteo EXACTO), `openFraction`
+///    siempre NULL (no se estima a ojo un conteo cerrado).
+///  - sabor a granel: `closedUnits` = latas cerradas, `openUnits` = latas
+///    ABIERTAS, `openFraction` = fracción estimada del contenido de esas
+///    latas abiertas (obligatoria cuando `openUnits > 0`).
+model InventoryCountItem {
+  id             String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  countId        String @map("count_id") @db.Uuid
+  productId      String @map("product_id") @db.Uuid
+
+  /// CHECK >= 0 y CHECK (openFraction IS NULL OR openUnits > 0) agregados a
+  /// mano en la migración (Prisma no expresa CHECK declarativamente) --
+  /// mismo patrón que los CHECK de `InventoryMovement`.
+  closedUnits  Int?                   @map("closed_units")
+  openUnits    Int?                   @map("open_units")
+  openFraction OpenContainerFraction? @map("open_fraction")
+  /// Etapa 6.2.1, secciones 2/3/4 del prompt (CONFIRMADO por las planillas
+  /// físicas reales del cliente): sólo se usa en productos SABOR
+  /// (`Product.flavorId` no nulo), donde la planilla real distingue una
+  /// columna "Salón" (`closedUnits`/`openUnits`/`openFraction`, ya
+  /// existentes desde Etapa 4) de una columna "Depósito" -- existencia de
+  /// latas CERRADAS guardadas en el depósito/cámara PROPIO de esa misma
+  /// heladería (una `Location` ICE_CREAM_SHOP, no una `Location` DEPOT
+  /// separada). Aditivo al modelo existente, nunca un segundo modelo
+  /// paralelo de inventario: contribuye a `physicalQuantity` con el MISMO
+  /// mecanismo que `closedUnits` (mismo `unitsPerHandlingUnit`, sin
+  /// fracciones nuevas) -- la columna separada es sólo para trazabilidad
+  /// fiel a la planilla real, ya que ambas cantidades están físicamente en
+  /// la misma ubicación y se valorizan/reconcilian juntas contra el mismo
+  /// teórico. CHECK >= 0 agregado a mano en la migración.
+  depositoClosedUnits Int? @map("deposito_closed_units")
+  /// Etapa 6.2.2, secciones 14/15/17 del prompt: cuando el producto tiene
+  /// `ProductCountingPresentation` activas configuradas, `closedUnits` NO
+  /// se usa (sección 18: el backend rechaza recibir ambos a la vez) -- en
+  /// su lugar se registra acá, como snapshot histórico inmutable, EXACTAMENTE
+  /// lo que la empleada tipeó por presentación: `[{ presentationId,
+  /// unitOfMeasureName, quantity, conversionFactorToCanonical }]`. Mismo
+  /// criterio que el resto del proyecto para no perder trazabilidad (ver
+  /// `AuditLog.beforeValue`/`afterValue`) sin necesitar una tabla
+  /// relacional nueva sólo para esto. `physicalQuantity` ya incluye la suma
+  /// canónica resultante -- este campo es puramente informativo/histórico,
+  /// nunca se vuelve a leer para recalcular nada.
+  presentationBreakdown Json? @map("presentation_breakdown")
+
+  /// Cantidad física, normalizada a la unidad canónica del producto (mismo
+  /// concepto que `InventoryMovement.quantity`) -- calculada UNA VEZ por el
+  /// backend a partir de `closedUnits`/`openUnits`/`openFraction` y
+  /// `Product.unitsPerHandlingUnit`, nunca por el frontend (sección 3 del
+  /// prompt: "la empleada no debe hacer multiplicaciones").
+  physicalQuantity Decimal @map("physical_quantity") @db.Decimal(14, 3)
+
+  /// Completado por el backend DESPUÉS de guardar el conteo (conteo ciego,
+  /// RN-012) -- nunca antes. NULL hasta ese momento, nunca expuesto al
+  /// empleado mientras cuenta (sección 1 del prompt).
+  theoreticalQuantity Decimal? @map("theoretical_quantity") @db.Decimal(14, 3)
+  /// = physicalQuantity - theoreticalQuantity (sección 6 del prompt, RN-016).
+  /// Se conserva para siempre, incluso si en una etapa futura un ADMIN la
+  /// justifica y corrige el ledger -- nunca se sobrescribe.
+  difference          Decimal? @db.Decimal(14, 3)
+
+  /// true si `|difference|` superó el umbral configurado para la categoría
+  /// de este producto (sección 5 del prompt) -- ver
+  /// docs/ETAPA-4-APP-HELADERIA.md, "Reconteo inteligente", sobre los
+  /// umbrales (NINGÚN valor está inventado; sin configurar, nunca se marca).
+  /// true si `|difference|` superó el umbral configurado para la categoría
+  /// de este producto (umbral absoluto opcional, sección 5 del prompt de
+  /// Etapa 4) O si es un FALTANTE (difference < 0) que llega o supera el
+  /// 25% del teórico (regla PORCENTUAL obligatoria, CONFIRMADA por el
+  /// cliente -- sección 4 del prompt de Etapa 6.2). Es el MISMO campo/estado
+  /// `RECOUNT_REQUIRED` de Etapa 4 disparado por dos condiciones distintas
+  /// (nunca un sistema paralelo) -- ver `recountThresholdFor`/
+  /// `exceedsMandatoryShortagePercentage` en inventory-count.ts.
+  needsRecount Boolean @default(false) @map("needs_recount")
+  /// true una vez que este ítem específico ya pasó por su segundo conteo
+  /// (sección 5: "solicitar SEGUNDO conteo" -- una sola ronda adicional, no
+  /// un loop; ver decisión documentada en docs/ETAPA-4-APP-HELADERIA.md).
+  recounted    Boolean @default(false)
+
+  /// Resolución explícita de la diferencia (Etapa 6.2, secciones 4/5 del
+  /// prompt) -- NULL mientras esté pendiente. Un FALTANTE que pasó por
+  /// reconteo y se confirmó pasa a `SHORTAGE_CONFIRMED` ("FALTANTE
+  /// CONFIRMADO", el primer conteo NUNCA se sobrescribe -- sigue en
+  /// `physicalQuantity`/`difference` de este mismo registro, sólo se agrega
+  /// la resolución). Un SOBRANTE nunca se acepta en silencio como una
+  /// diferencia normal -- requiere este mismo gesto explícito
+  /// (`SURPLUS_RESOLVED`) antes de considerarse resuelto (sección 5).
+  differenceResolution     DifferenceResolutionKind? @map("difference_resolution")
+  differenceResolvedById   String?                   @map("difference_resolved_by") @db.Uuid
+  differenceResolvedAt     DateTime?                 @map("difference_resolved_at") @db.Timestamptz(6)
+  differenceResolutionNote String?                   @map("difference_resolution_note")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization             Organization                  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  count                    InventoryCount                @relation(fields: [organizationId, countId], references: [organizationId, id], onDelete: Restrict)
+  product                  Product                       @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  differenceResolvedBy     AppUser?                      @relation(fields: [organizationId, differenceResolvedById], references: [organizationId, id], onDelete: Restrict)
+  typoCandidatesAsShortage InventoryCountTypoCandidate[] @relation("TypoCandidateShortageItem")
+  typoCandidatesAsSurplus  InventoryCountTypoCandidate[] @relation("TypoCandidateSurplusItem")
+
+  /// Un producto aparece una única vez por conteo.
+  @@unique([countId, productId])
+  /// Habilita la FK compuesta (organizationId, shortageItemId/surplusItemId)
+  /// desde InventoryCountTypoCandidate -- Etapa 6.2.
+  @@unique([organizationId, id])
+  @@index([organizationId, countId])
+  @@map("inventory_count_item")
+}
+
+/// Estado de la revisión explícita de una diferencia (Etapa 6.2). Ver
+/// comentario de `InventoryCountItem.differenceResolution`.
+enum DifferenceResolutionKind {
+  SHORTAGE_CONFIRMED
+  SURPLUS_RESOLVED
+
+  @@map("difference_resolution_kind")
+}
+
+enum TypoCandidateStatus {
+  PENDING
+  CONFIRMED
+  REJECTED
+
+  @@map("typo_candidate_status")
+}
+
+/// Posible error de tipeo entre dos productos del mismo conteo (sección 6
+/// del prompt de Etapa 6.2, CONFIRMADO por el cliente): un FALTANTE en un
+/// producto compensado EXACTAMENTE por un SOBRANTE en otro, ambos con el
+/// MISMO precio de VENTA (nunca costo). Es sólo una SUGERENCIA calculada y
+/// persistida para revisión -- nunca modifica `Sale`/`InventoryMovement`
+/// automáticamente, nunca decide sola cuál producto fue el mal tipeado
+/// (los datos no lo prueban). `status` empieza en PENDING; un ADMIN la
+/// confirma o rechaza explícitamente (`resolvedById`), con nota opcional.
+model InventoryCountTypoCandidate {
+  id             String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  countId        String @map("count_id") @db.Uuid
+  shortageItemId String @map("shortage_item_id") @db.Uuid
+  surplusItemId  String @map("surplus_item_id") @db.Uuid
+
+  /// Cantidad (en unidad canónica) en la que la diferencia de ambos
+  /// productos se compensa exactamente -- `|shortage.difference| =
+  /// |surplus.difference| = compensatingQuantity`.
+  compensatingQuantity Decimal @map("compensating_quantity") @db.Decimal(14, 3)
+  /// Precio de VENTA vigente compartido por ambos productos, usado como
+  /// evidencia de la sugerencia -- nunca el costo (sección 6 del prompt).
+  salePriceUsed        Decimal @map("sale_price_used") @db.Decimal(14, 2)
+
+  status         TypoCandidateStatus @default(PENDING)
+  resolvedById   String?             @map("resolved_by") @db.Uuid
+  resolvedAt     DateTime?           @map("resolved_at") @db.Timestamptz(6)
+  resolutionNote String?             @map("resolution_note")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  count        InventoryCount     @relation(fields: [organizationId, countId], references: [organizationId, id], onDelete: Restrict)
+  shortageItem InventoryCountItem @relation("TypoCandidateShortageItem", fields: [organizationId, shortageItemId], references: [organizationId, id], onDelete: Restrict)
+  surplusItem  InventoryCountItem @relation("TypoCandidateSurplusItem", fields: [organizationId, surplusItemId], references: [organizationId, id], onDelete: Restrict)
+  resolvedBy   AppUser?           @relation(fields: [organizationId, resolvedById], references: [organizationId, id], onDelete: Restrict)
+
+  /// El mismo par (faltante, sobrante) nunca se sugiere dos veces para el
+  /// mismo conteo -- si ya existe, se reutiliza (mismo criterio de
+  /// no-duplicación que el resto del proyecto).
+  @@unique([organizationId, countId, shortageItemId, surplusItemId])
+  @@index([organizationId, countId, status])
+  @@map("inventory_count_typo_candidate")
+}
+
+/// Merma con foto (RF-024/025, RN-029..032). Deliberadamente NO duplica
+/// `quantity`/`reason`/`locationId`/`productId`/`occurredAt`/`createdById`:
+/// esos ya están en el `InventoryMovement` WASTE que la merma genera --
+/// `movementId` los referencia. Sólo agrega lo que el ledger no tiene: la
+/// foto (RN-029: obligatoria) y la idempotencia propia del alta desde la PWA.
+///
+/// "Costo perdido" / "valor de venta perdido" por separado (RN-032) queda
+/// PENDIENTE: depende de costo/precio vigente por producto, que el catálogo
+/// de Etapa 2 explícitamente no modela todavía (RF-039, P3, fuera del Hito
+/// 1) -- ver docs/ETAPA-4-APP-HELADERIA.md, "Pendientes".
+model Waste {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  /// Movimiento WASTE generado en la misma transacción -- ver
+  /// `createWaste` en apps/api/src/services/inventory-ledger.ts. La
+  /// idempotencia de la merma NO se duplica acá: es la del propio
+  /// `InventoryMovement` (`idempotencyKey`/`idempotencyFingerprint`, ya
+  /// existentes desde Etapa 3) la que decide si el alta es un retry
+  /// legítimo o un conflicto -- exactamente el mismo mecanismo que
+  /// INITIAL_STOCK/ADJUSTMENT, sin inventar uno paralelo.
+  movementId     String   @map("movement_id") @db.Uuid
+  /// Ruta dentro de Supabase Storage (bucket privado), NUNCA una URL pública
+  /// ni base64 en la base de datos (sección 8 del prompt) -- ver
+  /// docs/ETAPA-4-APP-HELADERIA.md, "Storage".
+  photoPath      String   @map("photo_path")
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization      @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  movement     InventoryMovement @relation(fields: [organizationId, movementId], references: [organizationId, id], onDelete: Restrict)
+
+  @@unique([organizationId, movementId])
+  @@map("waste")
+}
+
+/// Gasto variable de una heladería (RF-026/RN-033). Entidad propia, sin
+/// relación con el ledger de inventario (sección 9 del prompt) ni con caja
+/// (Etapa 7, fuera de alcance). `category` es texto libre configurable, no
+/// un catálogo cerrado -- ningún catálogo de categorías está CONFIRMADO
+/// todavía (sección 9 del prompt: "no inventar categorías obligatorias").
+/// `receiptPath` es nullable a propósito: RN-033 dice literalmente
+/// "comprobante (si existe)", no obligatorio.
+model VariableExpense {
+  id             String   @id @default(uuid()) @db.Uuid
+  organizationId String   @map("organization_id") @db.Uuid
+  locationId     String   @map("location_id") @db.Uuid
+  amount         Decimal  @db.Decimal(12, 2)
+  category       String
+  description    String
+  /// Ruta en Supabase Storage (bucket privado) -- ver `Waste.photoPath`.
+  receiptPath    String?  @map("receipt_path")
+  occurredAt     DateTime @map("occurred_at") @db.Timestamptz(6)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  createdById    String   @map("created_by") @db.Uuid
+
+  idempotencyKey         String @map("idempotency_key")
+  idempotencyFingerprint String @map("idempotency_fingerprint")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location     Location     @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  createdBy    AppUser      @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, locationId, occurredAt])
+  @@map("variable_expense")
+}
+
+/// Clasificación de un evento "sin stock" (RF-019/RN-019, CONFIRMADO
+/// textualmente: "reposición urgente posible" / "faltante de
+/// abastecimiento"). Nombres tomados de la propuesta conceptual de Etapa 0
+/// (`URGENT_RESTOCK`/`SUPPLY_SHORTAGE`), sección 10.5.
+enum StockoutClassification {
+  URGENT_RESTOCK
+  SUPPLY_SHORTAGE
+
+  @@map("stockout_classification")
+}
+
+/// Evento "sin stock" (RF-019/RN-019). NO es un movimiento de inventario --
+/// no modifica stock, no crea stock artificial, no bloquea nada por saldo
+/// negativo (sección 10 del prompt). `classification` se calcula, cuando es
+/// posible, leyendo el stock YA EXISTENTE de las ubicaciones tipo DEPOT de
+/// la organización (mismo cálculo de `getStockBalances`, sin ninguna
+/// funcionalidad de depósito nueva) -- NULL si no hay ninguna ubicación
+/// DEPOT configurada, en vez de inventar una clasificación por defecto.
+model StockoutEvent {
+  id             String                  @id @default(uuid()) @db.Uuid
+  organizationId String                  @map("organization_id") @db.Uuid
+  locationId     String                  @map("location_id") @db.Uuid
+  productId      String                  @map("product_id") @db.Uuid
+  classification StockoutClassification?
+  occurredAt     DateTime                @default(now()) @map("occurred_at") @db.Timestamptz(6)
+  createdById    String                  @map("created_by") @db.Uuid
+
+  idempotencyKey         String @map("idempotency_key")
+  idempotencyFingerprint String @map("idempotency_fingerprint")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location     Location     @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  product      Product      @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  createdBy    AppUser      @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+
+  @@unique([organizationId, idempotencyKey])
+  @@index([organizationId, locationId, occurredAt])
+  @@map("stockout_event")
+}
+
+// ---------------------------------------------------------------------------
+// Importador de ventas (Etapa 5) — ver docs/ETAPA-5-IMPORTADOR-VENTAS.md.
+//
+// Fuente real inspeccionada: reporte "Mix de Ventas" del POS (archivo real
+// del cliente, exportado con el filtro "Precios: Desagrupados" para no
+// perder la identificación de Canje/promoción por línea -- la variante
+// "Agrupados" fusiona esas líneas y pierde esa distinción). Un producto se
+// identifica por el código numérico `articulo` del POS (estable entre
+// filas), nunca por su descripción de texto (que cambia según el precio o
+// la promoción aplicada). Ni el conteo ni la baja de lata ni la merma se
+// tocan -- este importador sólo agrega SALE y BOM_CONSUMPTION al ledger ya
+// existente de Etapa 3, reutilizando `sourceDocumentType`/`sourceDocumentId`
+// (ya RESERVADOS desde Etapa 3 para esto) en vez de una tabla de
+// trazabilidad nueva.
+
+/// Origen técnico de un import (identifica qué parser/columnas usar). Sólo
+/// `MIX_VENTAS` tiene evidencia real hoy -- agregar un origen nuevo (ej. un
+/// futuro importador de cierres de Mercado Pago, mencionado por el cliente
+/// pero fuera de alcance de esta etapa) es una migración simple que agrega
+/// un valor al enum, no un rediseño.
+enum SalesImportSource {
+  MIX_VENTAS
+}
+
+/// Estados del import (sección 15 del prompt de Etapa 5). Una vez
+/// CONFIRMED, sus efectos (Sale, movimientos SALE/BOM_CONSUMPTION,
+/// auditoría) son inmutables -- una corrección futura es una reversa
+/// trazable, nunca una edición silenciosa.
+enum SalesImportStatus {
+  /// Archivo recibido, todavía sin parsear (estado transitorio dentro de la
+  /// misma request de subida).
+  UPLOADED
+  /// Parseado con éxito; puede confirmarse (puede tener filas UNMAPPED --
+  /// eso nunca bloquea, sección 7).
+  PREVIEW_READY
+  /// Parseado, pero el total de las filas válidas no reconcilia contra el
+  /// "Total General" que el propio archivo declara -- condición crítica sin
+  /// resolver (sección 13): no se puede confirmar hasta subir un archivo
+  /// corregido.
+  BLOCKED
+  /// Confirmado: ventas, movimientos SALE/BOM_CONSUMPTION y auditoría ya
+  /// generados, de forma inmutable.
+  CONFIRMED
+  /// El archivo no pudo interpretarse en absoluto (formato no soportado,
+  /// hoja/encabezados distintos a los esperados) -- no llega a generar
+  /// ningún preview.
+  FAILED
+}
+
+/// Validez de una fila parseada (no confunde "sin mapear" -- que es un
+/// estado normal y esperado, sección 7 -- con "dato corrupto"). El mapeo a
+/// Product se resuelve en vivo contra ProductAlias en cada consulta de
+/// preview/confirmación, nunca se cachea acá -- así un alias creado después
+/// de la subida se toma en cuenta sin tener que resubir el archivo.
+enum SalesImportRowStatus {
+  VALID
+  ERROR
+}
+
+/// Una subida de archivo (RF de Etapa 5, sección 6 del prompt: "Admin
+/// selecciona ubicación... Admin sube archivo"). `fileHash` es un SHA-256
+/// del contenido exacto del archivo -- la idempotencia de subida (sección
+/// 8) se apoya en el índice único de abajo, nunca en el nombre del archivo.
+model SalesImport {
+  id             String            @id @default(uuid()) @db.Uuid
+  organizationId String            @map("organization_id") @db.Uuid
+  locationId     String            @map("location_id") @db.Uuid
+  source         SalesImportSource
+
+  originalFilename String  @map("original_filename")
+  fileHash         String  @map("file_hash")
+  /// Path en Supabase Storage del archivo original conservado (sección 19
+  /// del prompt) -- nunca el contenido en base64 en esta tabla.
+  storagePath      String? @map("storage_path")
+
+  /// Rango de fechas que el propio reporte declara (columnas `desde`/`hasta`
+  /// del archivo) -- el archivo no trae fecha por línea (limitación real del
+  /// export, documentada como supuesto en vez de inventar una fecha por
+  /// venta).
+  periodStart DateTime @map("period_start") @db.Date
+  periodEnd   DateTime @map("period_end") @db.Date
+
+  status SalesImportStatus @default(UPLOADED)
+
+  totalRows       Int      @default(0) @map("total_rows")
+  validRows       Int      @default(0) @map("valid_rows")
+  errorRows       Int      @default(0) @map("error_rows")
+  totalQuantity   Decimal  @default(0) @map("total_quantity") @db.Decimal(14, 3)
+  totalAmount     Decimal  @default(0) @map("total_amount") @db.Decimal(14, 2)
+  /// Total que el propio archivo declara en su fila "Total General" --
+  /// usado para la reconciliación de la sección 13, conservado para
+  /// auditoría/depuración.
+  fileStatedTotal Decimal? @map("file_stated_total") @db.Decimal(14, 2)
+
+  blockedReason String? @map("blocked_reason")
+  failedReason  String? @map("failed_reason")
+
+  createdById String   @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  confirmedById String?   @map("confirmed_by") @db.Uuid
+  confirmedAt   DateTime? @map("confirmed_at") @db.Timestamptz(6)
+
+  /// Idempotencia de la CONFIRMACIÓN (sección 9 del prompt, mismo patrón
+  /// endurecido en Etapa 3.2/4.1: clave + fingerprint + UNIQUE + resolución
+  /// explícita de carrera) -- deliberadamente separada de `fileHash` (esa es
+  /// la idempotencia de SUBIDA, una operación distinta).
+  confirmIdempotencyKey         String? @map("confirm_idempotency_key")
+  confirmIdempotencyFingerprint String? @map("confirm_idempotency_fingerprint")
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location     Location         @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  createdBy    AppUser          @relation("SalesImportCreatedBy", fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+  confirmedBy  AppUser?         @relation("SalesImportConfirmedBy", fields: [organizationId, confirmedById], references: [organizationId, id], onDelete: Restrict)
+  rows         SalesImportRow[]
+  sales        Sale[]
+
+  /// Habilita la FK compuesta (organizationId, salesImportId) desde
+  /// SalesImportRow/Sale.
+  @@unique([organizationId, id])
+  /// Idempotencia de SUBIDA (sección 8): subir el mismo archivo exacto dos
+  /// veces para la misma ubicación no genera un segundo import. NULL no
+  /// colisiona con NULL (no aplica acá, fileHash siempre se completa al
+  /// crear la fila).
+  @@unique([organizationId, locationId, fileHash])
+  @@unique([organizationId, confirmIdempotencyKey])
+  @@index([organizationId, locationId, createdAt])
+  @@map("sales_import")
+}
+
+/// Una fila del archivo ya parseada y validada (RF sección 5: "filas
+/// originales relevantes"). Guarda sólo las columnas REALMENTE presentes en
+/// el archivo real inspeccionado -- ver docs/ETAPA-5-IMPORTADOR-VENTAS.md,
+/// "Columnas utilizadas/ignoradas" -- nunca el Excel entero como blob.
+model SalesImportRow {
+  id             String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  salesImportId  String @map("sales_import_id") @db.Uuid
+
+  /// Número de fila en el archivo original (base 0, incluye el encabezado)
+  /// -- para que un error se pueda señalar exactamente como en el Excel.
+  rowNumber Int @map("row_number")
+
+  /// Código numérico de artículo del POS (columna `articulo`) -- identidad
+  /// ESTABLE del producto entre filas, nunca la descripción de texto
+  /// (sección 7 del prompt: "no usar nombre como FK").
+  rawArticleCode String @map("raw_article_code")
+  /// Descripción completa tal cual viene en el archivo (columna
+  /// `artdescrip`), incluyendo el sufijo de promoción/Canje entre
+  /// paréntesis cuando corresponde -- nunca editada.
+  rawDescription String @map("raw_description")
+  /// Grupo/rubro del artículo (columna `grudescrip`) -- sólo informativo.
+  rawGroup       String @map("raw_group")
+
+  /// Cantidad vendida (columna `cantidad`), en la unidad de manejo PROPIA
+  /// del artículo tal como lo carga el POS -- la conversión a cantidad
+  /// canónica la hace el backend con `Product.unitsPerHandlingUnit` al
+  /// confirmar, igual criterio que el resto del ledger (nunca en el
+  /// cliente).
+  quantity Decimal @db.Decimal(14, 3)
+  /// Importe REAL de la línea (columna `total`) -- la facturación se toma
+  /// de acá, nunca de un precio de lista teórico (sección 3 del prompt).
+  amount   Decimal @db.Decimal(14, 2)
+
+  /// true si la columna `promocion` viene con un código distinto de cero --
+  /// el POS aplicó algún precio promocional a esta línea (Canje u otro tipo
+  /// de promoción, p. ej. descuentos de apps de delivery).
+  isPromotion   Boolean @default(false) @map("is_promotion")
+  /// true si, además, la descripción incluye la palabra "Canje" (evidencia
+  /// real: es el único indicador textual que el propio archivo usa para un
+  /// canje puntual -- nunca se asume un % fijo de descuento, sección 4 del
+  /// prompt).
+  isCanje       Boolean @default(false) @map("is_canje")
+  promotionCode String? @map("promotion_code")
+
+  /// Columnas presentes en el archivo real pero sólo informativas (sección
+  /// 3 del prompt: "se pueden almacenar cuando sean útiles, sólo si están
+  /// efectivamente presentes") -- ninguna participa del cálculo de
+  /// facturación ni de stock.
+  unitPriceAvg Decimal? @map("unit_price_avg") @db.Decimal(14, 4)
+  bultos       String?
+  kilos        Decimal? @db.Decimal(14, 3)
+  pctOfTotal   Decimal? @map("pct_of_total") @db.Decimal(9, 4)
+
+  status       SalesImportRowStatus
+  errorMessage String?              @map("error_message")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  salesImport  SalesImport  @relation(fields: [organizationId, salesImportId], references: [organizationId, id], onDelete: Restrict)
+  sale         Sale?
+
+  @@unique([organizationId, salesImportId, rowNumber])
+  /// Habilita la FK compuesta (organizationId, salesImportRowId) desde Sale.
+  @@unique([organizationId, id])
+  @@index([organizationId, salesImportId, status])
+  @@map("sales_import_row")
+}
+
+/// Mapeo ADMIN-confirmado entre un código externo (`articulo` del POS) y un
+/// Product del catálogo (sección 7 del prompt: "alias por fuente"). Nunca
+/// se crea sola/automáticamente -- toda fila de acá la escribió
+/// explícitamente un ADMIN (`confirmedById`), incluso si el valor sugerido
+/// vino de una coincidencia textual.
+model ProductAlias {
+  id                  String            @id @default(uuid()) @db.Uuid
+  organizationId      String            @map("organization_id") @db.Uuid
+  source              SalesImportSource
+  externalCode        String            @map("external_code")
+  /// Última descripción externa vista para este código -- sólo para mostrar
+  /// contexto en el admin-web, nunca se usa para resolver el mapeo.
+  externalDescription String?           @map("external_description")
+  productId           String            @map("product_id") @db.Uuid
+
+  confirmedById String   @map("confirmed_by") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  product      Product      @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  confirmedBy  AppUser      @relation(fields: [organizationId, confirmedById], references: [organizationId, id], onDelete: Restrict)
+
+  /// A lo sumo un mapeo por código externo, por fuente, por organización.
+  @@unique([organizationId, source, externalCode])
+  @@index([organizationId, productId])
+  @@map("product_alias")
+}
+
+/// Receta/BOM (RF-007 e Insumos y BOM/recetas del documento del cliente,
+/// sección 18: "las recetas se gestionan en base de datos, nunca
+/// hardcodeadas"). `quantityPerUnit` está expresada en unidad CANÓNICA del
+/// componente por cada unidad CANÓNICA del producto vendido -- mismo
+/// criterio de "todo en unidad canónica" que ya usa `InventoryMovement`.
+model BillOfMaterialItem {
+  id             String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+
+  /// Producto VENDIDO (el que dispara el consumo al confirmarse una venta).
+  productId          String  @map("product_id") @db.Uuid
+  /// Insumo/componente CONSUMIDO por cada unidad del producto vendido.
+  componentProductId String  @map("component_product_id") @db.Uuid
+  quantityPerUnit    Decimal @map("quantity_per_unit") @db.Decimal(14, 6)
+
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization     Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  product          Product      @relation("BomProduct", fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  componentProduct Product      @relation("BomComponent", fields: [organizationId, componentProductId], references: [organizationId, id], onDelete: Restrict)
+
+  /// Una única línea de receta por par (producto vendido, componente) --
+  /// para cambiar la cantidad se actualiza esta fila, no se duplica.
+  @@unique([organizationId, productId, componentProductId])
+  @@index([organizationId, productId])
+  @@map("bill_of_material_item")
+}
+
+// ---------------------------------------------------------------------------
+// Precios/costos históricos (Etapa 6.2) — ver docs/ETAPA-6.2-CIERRE-INTEGRAL.md.
+//
+// Fuentes reales inspeccionadas: "Lista_Precio_Costo.xlsx" (hoja "Precio
+// Helacor" -- columnas descripción / "Precio S/ IVA" / "Precio C/ IVA", sin
+// código de artículo) y "Lista_Valor_venta_de_SEP2026.xlsx" (hoja "Precios
+// Grido" -- descripción / precio único, sin código). Ninguno de los dos
+// archivos trae una columna de vigencia/período estructurada -- el texto
+// "Septiembre 2026" es un rótulo libre en una celda, nunca una fecha
+// parseable con certeza (sección 1 del prompt de Etapa 6.2: "no hardcodear
+// 'septiembre de 2026'") -- por eso `PriceListImport.effectiveFrom` es
+// SIEMPRE provisto por el ADMIN al confirmar, nunca inferido del archivo.
+//
+// Principio (RN nueva, CONFIRMADO): el precio/costo de un producto cambia en
+// el tiempo -- nunca se pisa un valor anterior, se agrega uno nuevo con su
+// propia vigencia (mismo espíritu append-only que `InventoryMovement`).
+
+/// Sólo dos tipos IMPLEMENTADOS en Hito 1 (sección 7 del prompt: "como
+/// mínimo COSTO y PRECIO DE VENTA"). COST_WITH_TAX es EXCLUSIVAMENTE el
+/// costo CON IVA (columna "Precio C/ IVA" del archivo real) -- el cliente
+/// confirmó usar ese valor para la valorización (sección 10), nunca el
+/// S/IVA. El valor S/IVA del archivo de costos se conserva sólo como dato
+/// informativo de la fila cruda importada (`PriceListImportRow`), nunca
+/// como un `PriceValue` propio -- no hay ningún RN que pida valorizar con
+/// costo sin IVA.
+enum PriceType {
+  COST_WITH_TAX
+  SALE_PRICE
+
+  @@map("price_type")
+}
+
+/// Cada fuente real tiene su propio formato de columnas fijo (ver arriba) --
+/// el `priceType` que produce cada una es 1:1 y constante, nunca mixto
+/// dentro del mismo archivo.
+enum PriceListSource {
+  HELACOR_COST_LIST
+  HELACOR_SALE_PRICE_LIST
+
+  @@map("price_list_source")
+}
+
+/// Mismo espíritu que `SalesImportStatus` (Etapa 5) pero sin `BLOCKED`: los
+/// dos archivos reales inspeccionados no traen ninguna fila de "total
+/// general" contra la que reconciliar (a diferencia del Mix de Ventas del
+/// POS) -- no hay ninguna condición crítica de ese tipo que detectar acá.
+enum PriceListImportStatus {
+  UPLOADED
+  PREVIEW_READY
+  CONFIRMED
+  FAILED
+
+  @@map("price_list_import_status")
+}
+
+enum PriceListRowStatus {
+  VALID
+  ERROR
+
+  @@map("price_list_row_status")
+}
+
+/// Una subida de archivo de precios/costos (idempotente por `fileHash`,
+/// mismo criterio que `SalesImport`). `effectiveFrom` es la vigencia que el
+/// ADMIN indica explícitamente al CONFIRMAR (nunca al subir) -- el parseo/
+/// preview no la necesita todavía.
+model PriceListImport {
+  id             String          @id @default(uuid()) @db.Uuid
+  organizationId String          @map("organization_id") @db.Uuid
+  source         PriceListSource
+  priceType      PriceType       @map("price_type")
+
+  originalFilename String  @map("original_filename")
+  fileHash         String  @map("file_hash")
+  storagePath      String? @map("storage_path")
+
+  /// Rótulo de período tal cual aparece en el archivo (ej. "Septiembre
+  /// 2026") -- puramente informativo, NUNCA parseado como fecha (sección 1
+  /// del prompt: "no hardcodear 'septiembre de 2026'").
+  rawPeriodLabel String? @map("raw_period_label")
+
+  status PriceListImportStatus @default(UPLOADED)
+
+  totalRows Int @default(0) @map("total_rows")
+  validRows Int @default(0) @map("valid_rows")
+  errorRows Int @default(0) @map("error_rows")
+
+  failedReason String? @map("failed_reason")
+
+  createdById String   @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  /// Vigencia que el ADMIN indicó al confirmar (sección 9 del prompt:
+  /// "período/vigencia indicado"). NULL hasta la confirmación.
+  effectiveFrom DateTime? @map("effective_from") @db.Date
+
+  confirmedById String?   @map("confirmed_by") @db.Uuid
+  confirmedAt   DateTime? @map("confirmed_at") @db.Timestamptz(6)
+
+  /// Idempotencia de CONFIRMACIÓN (mismo patrón que `SalesImport`).
+  confirmIdempotencyKey         String? @map("confirm_idempotency_key")
+  confirmIdempotencyFingerprint String? @map("confirm_idempotency_fingerprint")
+
+  organization Organization         @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  createdBy    AppUser              @relation("PriceListImportCreatedBy", fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+  confirmedBy  AppUser?             @relation("PriceListImportConfirmedBy", fields: [organizationId, confirmedById], references: [organizationId, id], onDelete: Restrict)
+  rows         PriceListImportRow[]
+  priceValues  PriceValue[]
+
+  @@unique([organizationId, id])
+  /// Subir el mismo archivo exacto dos veces (misma fuente) no genera un
+  /// segundo import -- mismo criterio que `SalesImport.fileHash`.
+  @@unique([organizationId, source, fileHash])
+  @@unique([organizationId, confirmIdempotencyKey])
+  @@index([organizationId, source, createdAt])
+  @@map("price_list_import")
+}
+
+/// Fila cruda ya parseada (sólo las columnas REALMENTE presentes en los
+/// archivos reales -- sección 9 del prompt: "nunca inventar columnas").
+/// Ninguno de los dos archivos trae código de artículo -- `rawLabel` (la
+/// descripción de texto) es la única identidad disponible en la fuente.
+model PriceListImportRow {
+  id                String @id @default(uuid()) @db.Uuid
+  organizationId    String @map("organization_id") @db.Uuid
+  priceListImportId String @map("price_list_import_id") @db.Uuid
+
+  rowNumber Int @map("row_number")
+
+  /// Descripción cruda tal cual aparece en la fila (ej. "CASATTA x 8
+  /// Porciones"), recortada de espacios. Es la clave de identidad de
+  /// `PriceReference.label` -- ver el modelo de abajo para la limitación
+  /// documentada de este criterio.
+  rawLabel    String  @map("raw_label")
+  /// Último encabezado de categoría/sección visto ANTES de esta fila en la
+  /// planilla (ej. "POSTRES", "BOMBONES") -- dato real presente en el
+  /// archivo (filas fusionadas sólo con esa etiqueta), puramente informativo
+  /// (sección 1 del prompt: nunca se inventan categorías nuevas).
+  rawCategory String? @map("raw_category")
+
+  /// Sólo presente en archivos de costo (columna "Precio S/ IVA") --
+  /// informativo, nunca se valoriza con este valor (ver comentario de
+  /// `PriceType.COST_WITH_TAX`).
+  rawValueWithoutTax Decimal? @map("raw_value_without_tax") @db.Decimal(14, 2)
+  /// El valor efectivamente usado: "Precio C/ IVA" en el archivo de costos,
+  /// el único precio en el archivo de venta.
+  rawValueWithTax    Decimal? @map("raw_value_with_tax") @db.Decimal(14, 2)
+
+  status       PriceListRowStatus
+  errorMessage String?            @map("error_message")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization    Organization    @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  priceListImport PriceListImport @relation(fields: [organizationId, priceListImportId], references: [organizationId, id], onDelete: Restrict)
+  priceValue      PriceValue?
+
+  @@unique([organizationId, priceListImportId, rowNumber])
+  @@unique([organizationId, id])
+  @@index([organizationId, priceListImportId, status])
+  @@map("price_list_import_row")
+}
+
+/// Referencia ESTABLE de precio/costo (sección 7 del prompt: "producto/
+/// referencia... relación con catálogo"). Identificada por (organización,
+/// tipo, `label`) -- el `label` es la descripción EXACTA (recortada) de la
+/// fuente real, porque ninguno de los dos archivos trae código de artículo
+/// (sección 9). Reimportar el mismo archivo (u otro con las mismas
+/// etiquetas) reutiliza la MISMA referencia y sólo agrega un `PriceValue`
+/// nuevo si la vigencia es distinta -- nunca se crea una segunda referencia
+/// para la misma etiqueta.
+///
+/// LIMITACIÓN DOCUMENTADA (sección 9/26 del prompt: "si algo no se puede
+/// validar, documentarlo en vez de inventar"): si Grido cambia la redacción
+/// exacta de una etiqueta entre listas (ej. un espacio de más, una palabra
+/// reordenada), este criterio crea una referencia NUEVA en vez de continuar
+/// el historial de la vieja -- nunca corrompe un valor existente (es
+/// estrictamente aditivo), pero exige que un ADMIN vuelva a confirmar el
+/// mapeo de la etiqueta nueva. No se resuelve con coincidencia difusa
+/// (similarity matching) porque el prompt prohíbe explícitamente inferir
+/// mapeos por similitud textual sin confirmación humana (sección 8).
+model PriceReference {
+  id             String    @id @default(uuid()) @db.Uuid
+  organizationId String    @map("organization_id") @db.Uuid
+  priceType      PriceType @map("price_type")
+  label          String
+
+  /// Última categoría vista en la fuente para esta referencia (sección 1 del
+  /// prompt) -- se actualiza en cada import que vuelva a traer esta
+  /// etiqueta, puramente informativo para la UI de revisión.
+  sourceCategory String? @map("source_category")
+
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  organization Organization                   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  values       PriceValue[]
+  mappings     PriceReferenceProductMapping[]
+
+  @@unique([organizationId, priceType, label])
+  @@unique([organizationId, id])
+  @@index([organizationId, priceType])
+  @@map("price_reference")
+}
+
+/// Valor histórico de una referencia (sección 7 del prompt: "vigencia,
+/// fuente"). Nunca se edita ni se borra -- un cambio de precio agrega una
+/// fila nueva con una `effectiveFrom` distinta. El precio/costo "vigente"
+/// de una referencia a una fecha dada es el `PriceValue` con la mayor
+/// `effectiveFrom <= esa fecha` (ver `resolveEffectivePriceValue` en
+/// price-list.ts) -- nunca el más recientemente importado si su vigencia es
+/// posterior a la fecha consultada.
+model PriceValue {
+  id               String    @id @default(uuid()) @db.Uuid
+  organizationId   String    @map("organization_id") @db.Uuid
+  priceReferenceId String    @map("price_reference_id") @db.Uuid
+  priceType        PriceType @map("price_type")
+  value            Decimal   @db.Decimal(14, 2)
+  effectiveFrom    DateTime  @map("effective_from") @db.Date
+
+  priceListImportId    String @map("price_list_import_id") @db.Uuid
+  priceListImportRowId String @map("price_list_import_row_id") @db.Uuid
+
+  createdById String   @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization       Organization            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  priceReference     PriceReference          @relation(fields: [organizationId, priceReferenceId], references: [organizationId, id], onDelete: Restrict)
+  priceListImport    PriceListImport         @relation(fields: [organizationId, priceListImportId], references: [organizationId, id], onDelete: Restrict)
+  priceListImportRow PriceListImportRow      @relation(fields: [organizationId, priceListImportRowId], references: [organizationId, id], onDelete: Restrict)
+  createdBy          AppUser                 @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+  snapshotItems      InventorySnapshotItem[]
+
+  /// A lo sumo un valor por (referencia, vigencia exacta) -- dos archivos
+  /// que declaren vigencias distintas para el mismo día son, por
+  /// definición, un conflicto que el admin debe resolver eligiendo otra
+  /// fecha, nunca algo que el sistema decida solo (sección 9 del prompt: "no
+  /// asumir que dos archivos del mismo período son necesariamente
+  /// duplicados").
+  @@unique([organizationId, priceReferenceId, effectiveFrom])
+  @@unique([organizationId, id])
+  /// 1:1 con la fila cruda que originó este valor (`PriceListImportRow.priceValue`).
+  @@unique([organizationId, priceListImportRowId])
+  @@index([organizationId, priceReferenceId, effectiveFrom])
+  @@map("price_value")
+}
+
+/// Mapeo ADMIN-confirmado entre una `PriceReference` (fuente Grido) y UNO O
+/// VARIOS `Product` del catálogo interno (sección 8 del prompt: "Grido
+/// 'Palito Frutales' -> Palito Frutal Frutilla/Limón/Naranja" -- nunca se
+/// asume 1:1). Nunca se crea sola/automáticamente por similitud textual --
+/// toda fila la escribió explícitamente un ADMIN (`confirmedById`).
+model PriceReferenceProductMapping {
+  id               String    @id @default(uuid()) @db.Uuid
+  organizationId   String    @map("organization_id") @db.Uuid
+  priceReferenceId String    @map("price_reference_id") @db.Uuid
+  /// Denormalizado desde `PriceReference.priceType` -- habilita el índice
+  /// único parcial de abajo sin un JOIN (mismo criterio de denormalización
+  /// ya usado en `Sale.locationId`, denormalizado desde `SalesImport`).
+  priceType        PriceType @map("price_type")
+  productId        String    @map("product_id") @db.Uuid
+
+  /// Un producto puede quedar sin mapeo activo momentáneamente (se desactiva
+  /// antes de confirmar el nuevo) -- se conserva la fila vieja para
+  /// auditoría en vez de borrarla.
+  active Boolean @default(true)
+
+  confirmedById String   @map("confirmed_by") @db.Uuid
+  createdAt     DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  priceReference PriceReference @relation(fields: [organizationId, priceReferenceId], references: [organizationId, id], onDelete: Restrict)
+  product        Product        @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  confirmedBy    AppUser        @relation(fields: [organizationId, confirmedById], references: [organizationId, id], onDelete: Restrict)
+
+  /// Nunca se duplica la misma fila (referencia, producto).
+  @@unique([organizationId, priceReferenceId, productId])
+  /// A lo sumo UN mapeo ACTIVO por (producto, tipo de precio) -- un producto
+  /// nunca puede tener dos costos "vigentes" simultáneos ambiguos (sección 8:
+  /// "un mapeo ambiguo nunca debe modificar costos/precios en silencio").
+  /// Índice parcial agregado a mano en la migración (Prisma no expresa
+  /// `WHERE active` declarativamente).
+  @@index([organizationId, productId, priceType])
+  @@index([organizationId, priceReferenceId])
+  @@map("price_reference_product_mapping")
+}
+
+/// Venta CONFIRMADA (hecho inmutable, sección 5/15 del prompt) -- distinta
+/// de `SalesImportRow` (el dato crudo parseado, que existe desde el
+/// preview). Sólo se crea una fila acá para una `SalesImportRow` que, al
+/// momento de la confirmación, resuelve a un Product vía ProductAlias
+/// (sección 7: "si no está mapeado, no impactar stock" -- una fila sin
+/// mapear nunca genera un Sale). `occurredAt` usa `periodEnd` del import:
+/// el archivo no trae fecha por línea (ver comentario de SalesImport) --
+/// supuesto documentado, reversible sin migrar.
+model Sale {
+  id             String @id @default(uuid()) @db.Uuid
+  organizationId String @map("organization_id") @db.Uuid
+  locationId     String @map("location_id") @db.Uuid
+
+  salesImportId    String @map("sales_import_id") @db.Uuid
+  salesImportRowId String @map("sales_import_row_id") @db.Uuid
+  productId        String @map("product_id") @db.Uuid
+
+  quantity   Decimal @db.Decimal(14, 3)
+  amountReal Decimal @map("amount_real") @db.Decimal(14, 2)
+
+  isPromotion Boolean @default(false) @map("is_promotion")
+  isCanje     Boolean @default(false) @map("is_canje")
+
+  occurredAt DateTime @map("occurred_at") @db.Timestamptz(6)
+
+  /// El movimiento SALE que esta venta generó en el ledger (1:1, mismo
+  /// patrón que `Waste.movementId` de Etapa 4: reutiliza el ledger
+  /// existente en vez de duplicar su idempotencia/transacción). Los
+  /// eventuales movimientos BOM_CONSUMPTION de esta venta se referencian al
+  /// revés, vía `InventoryMovement.sourceDocumentType = 'SALE'` +
+  /// `sourceDocumentId = Sale.id` (mismo mecanismo RESERVADO desde Etapa 3,
+  /// sin agregar una tabla de trazabilidad nueva).
+  movementId String @map("movement_id") @db.Uuid
+
+  createdById String   @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization   Organization   @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location       Location       @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  salesImport    SalesImport    @relation(fields: [organizationId, salesImportId], references: [organizationId, id], onDelete: Restrict)
+  salesImportRow SalesImportRow @relation(fields: [organizationId, salesImportRowId], references: [organizationId, id], onDelete: Restrict)
+  product        Product        @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  createdBy      AppUser        @relation(fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+
+  /// A lo sumo una Sale por fila importada -- protege contra un retry de
+  /// confirmación que intente crear la venta dos veces por fuera de la
+  /// idempotencia de `SalesImport.confirmIdempotencyKey` (defensa en
+  /// profundidad, mismo criterio que Waste.movementId).
+  @@unique([organizationId, salesImportRowId])
+  @@unique([organizationId, movementId])
+  @@index([organizationId, locationId, occurredAt])
+  @@map("sale")
+}
+
+/// Estado del cierre semanal (Etapa 6, sección 11 del prompt). Deliberadamente
+/// sólo tres valores PERSISTIDOS -- "INCOMPLETE"/"READY_TO_CLOSE" sugeridos
+/// por el documento del cliente (sección 24.1) son ESTADOS DERIVADOS, nunca
+/// guardados: se calculan en el momento a partir del checklist (mismo
+/// criterio que `SalesImportPreview.canConfirm` de Etapa 5.1 -- ver
+/// `apps/api/src/services/weekly-closing.ts`, `computeChecklist`). Guardar un
+/// booleano/enum aparte para eso arriesgaría desincronizarse del checklist
+/// real; derivarlo siempre en el momento lo hace imposible.
+enum WeeklyClosingStatus {
+  /// Semana operativa en curso, todavía no cerrada. Único estado desde el
+  /// que se puede cerrar (`close`).
+  OPEN
+  /// Cierre definitivo: inmutable (sección 16 del prompt) -- ninguna
+  /// operación de Etapa 6 modifica un WeeklyClosing en este estado, salvo
+  /// `reopen`, que lo mueve a REOPENED.
+  CLOSED
+  /// Reabierto por un ADMIN (sección 12): el `InventorySnapshotItem` de la
+  /// revisión CLOSED anterior se preserva intacto (nunca se edita/borra) --
+  /// un nuevo cierre desde acá genera una revisión nueva, no reescribe la
+  /// vieja. Desde REOPENED se puede volver a cerrar (nueva revisión) igual
+  /// que desde OPEN.
+  REOPENED
+
+  @@map("weekly_closing_status")
+}
+
+/// Cierre semanal del núcleo operativo (Etapa 6, RF conceptual del documento
+/// del cliente sección 24, CONFIRMADO). Consolida el estado de una semana
+/// [periodStart..periodEnd] para una ubicación después de que conteo físico,
+/// mermas, retiros de latas, gastos variables y ventas importadas ya están
+/// cargados -- nunca reemplaza al ledger (`InventoryMovement` sigue siendo
+/// la única fuente de verdad de stock, sección 2 del prompt): esta tabla
+/// sólo consulta/compara/consolida y genera un snapshot histórico.
+///
+/// Período semanal (sección 4 del prompt, documento del cliente sección 24,
+/// cita textual): "Período: lunes a domingo. Cierre: lunes siguiente." ->
+/// `periodStart` es SIEMPRE un lunes, `periodEnd = periodStart + 6` (el
+/// domingo de esa misma semana) -- CHECK agregado a mano en la migración
+/// (Prisma no expresa `periodEnd = periodStart + 6` declarativamente, mismo
+/// patrón que otros CHECK del proyecto).
+///
+/// Qué conteo gobierna el cierre de un período [Lunes N .. Domingo N]: el
+/// documento del cliente (sección 15) confirma que "el conteo semanal
+/// principal se realiza los lunes por la mañana, antes de recibir o
+/// despachar mercadería" -- es decir, el conteo tomado el lunes SIGUIENTE
+/// (N+7) es el que valida lo ocurrido DURANTE el período N (el conteo del
+/// propio lunes N valida en cambio el CIERRE del período anterior). Por
+/// eso el backend busca el `InventoryCount` con
+/// `weekStart = periodStart + 7 días` -- ver
+/// `apps/api/src/services/weekly-closing.ts`, `getGoverningInventoryCount`,
+/// y docs/ETAPA-6-CIERRE-SEMANAL.md, sección "Período semanal", para el
+/// ejemplo concreto de fechas con el que se verificó este razonamiento.
+model WeeklyClosing {
+  id             String              @id @default(uuid()) @db.Uuid
+  organizationId String              @map("organization_id") @db.Uuid
+  locationId     String              @map("location_id") @db.Uuid
+  periodStart    DateTime            @map("period_start") @db.Date
+  periodEnd      DateTime            @map("period_end") @db.Date
+  status         WeeklyClosingStatus @default(OPEN)
+
+  /// Confirmación ÚNICA y consolidada de que un ADMIN revisó el checklist
+  /// completo (mermas, gastos, ventas importadas, etc.) antes de cerrar --
+  /// sección 5 del prompt: "si el modelo actual no tiene forma inequívoca de
+  /// distinguir 'no hubo mermas' de 'nadie revisó las mermas', no inventar
+  /// una regla oculta". En vez de un flag booleano por sub-ítem (mermas
+  /// revisadas / gastos revisados / etc., que multiplicaría columnas sin
+  /// necesidad real), se usa UN solo gesto explícito de revisión que cubre
+  /// todo el checklist a la vez -- el ADMIN ve el resumen completo en la
+  /// misma pantalla antes de confirmar (sección 19). `countSubmitted` (ver
+  /// servicio) es la única sub-condición que SÍ se verifica de forma
+  /// automática e inequívoca (existencia de un InventoryCount COMPLETED).
+  reviewConfirmedById String?   @map("review_confirmed_by") @db.Uuid
+  reviewConfirmedAt   DateTime? @map("review_confirmed_at") @db.Timestamptz(6)
+
+  /// Incrementada en cada cierre exitoso (empieza en 0, pasa a 1 en el
+  /// primer `close`, a 2 si se reabre y se vuelve a cerrar, etc.). Sección
+  /// 12 del prompt: "preferir versionado... antes que mutar el snapshot
+  /// anterior" -- cada `InventorySnapshotItem` generado por un `close` queda
+  /// etiquetado con el valor de `currentRevision` vigente EN ESE MOMENTO,
+  /// así que reabrir y volver a cerrar nunca sobrescribe ni borra filas de
+  /// una revisión previa.
+  currentRevision Int @default(0) @map("current_revision")
+
+  createdById String   @map("created_by") @db.Uuid
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  /// Reflejan el cierre MÁS RECIENTE (si se reabre y se vuelve a cerrar, se
+  /// sobrescriben con los datos del nuevo cierre) -- el cierre anterior
+  /// queda igual trazado a través de `reopenedAt`/`reopenedById` y de las
+  /// filas de `InventorySnapshotItem` con `revision` menor.
+  closedById String?   @map("closed_by") @db.Uuid
+  closedAt   DateTime? @map("closed_at") @db.Timestamptz(6)
+
+  /// Reflejan la reapertura MÁS RECIENTE. `reopenReason` obligatorio a nivel
+  /// de aplicación (operación sensible, sección 12 del prompt) -- CHECK a
+  /// mano en la migración exige `reopen_reason IS NOT NULL` cuando
+  /// `reopened_at IS NOT NULL`, mismo patrón que el CHECK de `reason` en
+  /// `InventoryMovement`.
+  reopenedById String?   @map("reopened_by") @db.Uuid
+  reopenedAt   DateTime? @map("reopened_at") @db.Timestamptz(6)
+  reopenReason String?   @map("reopen_reason")
+
+  /// Idempotencia del cierre definitivo (sección 13 del prompt, mismo patrón
+  /// que Etapa 3.1/4.1: UNIQUE + fingerprint + resolución explícita de
+  /// carrera reconsultando Postgres). Se resetea a NULL en cada `reopen`
+  /// para que el próximo `close` pueda usar una clave nueva -- un reintento
+  /// de un `close` YA reabierto nunca debe confundirse con el cierre
+  /// anterior (clave distinta = revisión distinta).
+  closeIdempotencyKey         String? @map("close_idempotency_key")
+  closeIdempotencyFingerprint String? @map("close_idempotency_fingerprint")
+
+  organization      Organization            @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location          Location                @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  createdBy         AppUser                 @relation("WeeklyClosingCreatedBy", fields: [organizationId, createdById], references: [organizationId, id], onDelete: Restrict)
+  reviewConfirmedBy AppUser?                @relation("WeeklyClosingReviewConfirmedBy", fields: [organizationId, reviewConfirmedById], references: [organizationId, id], onDelete: Restrict)
+  closedBy          AppUser?                @relation("WeeklyClosingClosedBy", fields: [organizationId, closedById], references: [organizationId, id], onDelete: Restrict)
+  reopenedBy        AppUser?                @relation("WeeklyClosingReopenedBy", fields: [organizationId, reopenedById], references: [organizationId, id], onDelete: Restrict)
+  snapshotItems     InventorySnapshotItem[]
+
+  /// Habilita la FK compuesta (organizationId, weeklyClosingId) desde
+  /// InventorySnapshotItem.
+  @@unique([organizationId, id])
+  /// A lo sumo un WeeklyClosing por ubicación y período -- evita períodos
+  /// superpuestos y dos cierres activos para la misma ubicación/período
+  /// (sección 4 del prompt).
+  @@unique([organizationId, locationId, periodStart])
+  @@unique([organizationId, closeIdempotencyKey])
+  @@index([organizationId, locationId, periodStart])
+  @@map("weekly_closing")
+}
+
+/// Estado del cierre GENERAL de una semana (Etapa 6.2, sección 12 del
+/// prompt, CONFIRMADO: "la semana cierra cuando TODAS las heladerías
+/// requeridas terminaron su conteo"). No reemplaza ni destruye `WeeklyClosing`
+/// (que sigue existiendo un registro por ubicación, para trazabilidad
+/// individual) -- esta tabla es la vista/estado A NIVEL SEMANA que agrega
+/// todas las ubicaciones de tipo heladería activas de la organización
+/// ("heladerías requeridas" = `Location.active && Location.type ===
+/// 'ICE_CREAM_SHOP'`, nunca una lista hardcodeada). Ver
+/// `apps/api/src/services/general-weekly-closing.ts`.
+enum GeneralWeeklyClosingStatus {
+  OPEN
+  CLOSED
+
+  @@map("general_weekly_closing_status")
+}
+
+model GeneralWeeklyClosing {
+  id             String                     @id @default(uuid()) @db.Uuid
+  organizationId String                     @map("organization_id") @db.Uuid
+  periodStart    DateTime                   @map("period_start") @db.Date
+  periodEnd      DateTime                   @map("period_end") @db.Date
+  status         GeneralWeeklyClosingStatus @default(OPEN)
+
+  closedById String?   @map("closed_by") @db.Uuid
+  closedAt   DateTime? @map("closed_at") @db.Timestamptz(6)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  /// Idempotencia del cierre general (mismo patrón que `WeeklyClosing.closeIdempotencyKey`).
+  closeIdempotencyKey         String? @map("close_idempotency_key")
+  closeIdempotencyFingerprint String? @map("close_idempotency_fingerprint")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  closedBy     AppUser?     @relation(fields: [organizationId, closedById], references: [organizationId, id], onDelete: Restrict)
+
+  /// A lo sumo un cierre general por organización y período.
+  @@unique([organizationId, periodStart])
+  @@unique([organizationId, closeIdempotencyKey])
+  @@map("general_weekly_closing")
+}
+
+/// Snapshot histórico e inmutable de un producto al momento de un cierre
+/// semanal (sección 9 del prompt, CONFIRMADO). Nunca se recalcula
+/// retroactivamente con valores actuales -- congela `quantityTheoretical`/
+/// `quantityReal`/`difference` copiados directamente de la línea de
+/// `InventoryCountItem` que gobierna el cierre (nunca recalculados de forma
+/// independiente, para no arriesgar una discrepancia con el conteo real).
+///
+/// Valoración monetaria (sección 10 del prompt de Etapa 6, ampliada en Etapa
+/// 6.2): ahora usa `unitCostWithTax`/`totalValue`/`priceValueId` de abajo,
+/// resueltos contra el modelo histórico de precios/costos (`PriceValue`) al
+/// momento de cada `close` -- NUNCA recalculados retroactivamente: un
+/// `PriceValue` importado DESPUÉS de un cierre nunca cambia el
+/// `unitCostWithTax`/`totalValue` ya congelados acá (sección 10 del prompt de
+/// Etapa 6.2, ejemplo concreto: "Semana 1 usa costo $1.000 -> $10.000
+/// congelado; el costo cambia después a $1.200; Semana 1 sigue mostrando
+/// $10.000"). Ver `apps/api/src/services/weekly-closing.ts`,
+/// `resolveValuationForProducts`.
+model InventorySnapshotItem {
+  id              String @id @default(uuid()) @db.Uuid
+  organizationId  String @map("organization_id") @db.Uuid
+  /// Denormalizado desde el WeeklyClosing para consultas directas por
+  /// ubicación (misma convención que otras tablas del proyecto, p. ej.
+  /// `Sale.locationId` ya denormalizado desde `SalesImport`).
+  locationId      String @map("location_id") @db.Uuid
+  weeklyClosingId String @map("weekly_closing_id") @db.Uuid
+  productId       String @map("product_id") @db.Uuid
+
+  /// Coincide con `WeeklyClosing.currentRevision` en el momento en que esta
+  /// fila se generó -- distingue las filas de cierres sucesivos del mismo
+  /// WeeklyClosing (reabierto y vuelto a cerrar) sin mutar ni borrar las
+  /// anteriores (sección 12 del prompt).
+  revision Int
+
+  /// Copiados directamente de `InventoryCountItem.theoreticalQuantity` /
+  /// `.physicalQuantity` / `.difference` del conteo gobernante -- nunca
+  /// recalculados acá (sección 7 del prompt).
+  quantityTheoretical Decimal @map("quantity_theoretical") @db.Decimal(14, 3)
+  quantityReal        Decimal @map("quantity_real") @db.Decimal(14, 3)
+  difference          Decimal @db.Decimal(14, 3)
+
+  /// Movimiento COUNT_CORRECTION que reconcilia la diferencia histórica de
+  /// este producto para este `WeeklyClosing` (sección 8 del prompt,
+  /// documento del cliente sección 16.1: "el real pasa a ser el nuevo punto
+  /// de partida operativo... la diferencia histórica se conserva"). NULL
+  /// cuando `difference = 0` -- nunca se genera un ajuste sin diferencia
+  /// real.
+  ///
+  /// Etapa 6.1: un mismo `WeeklyClosing` genera A LO SUMO un
+  /// COUNT_CORRECTION por producto en toda su vida (ver el UNIQUE parcial
+  /// sobre `inventory_movement` agregado a mano en la migración
+  /// `20260910120000_weekly_closing_correction_traceability_etapa6_1`) --
+  /// si se reabre y se vuelve a cerrar SIN un conteo nuevo, la revisión
+  /// siguiente reutiliza el MISMO `countCorrectionMovementId` (nunca crea
+  /// uno nuevo), así que esta columna YA NO es única por fila: varias
+  /// `InventorySnapshotItem` de distintas revisiones del mismo cierre
+  /// pueden apuntar al mismo movimiento -- ver
+  /// `apps/api/src/services/weekly-closing.ts`, `closeWeeklyClosing`.
+  countCorrectionMovementId String? @map("count_correction_movement_id") @db.Uuid
+
+  /// Etapa 6.2, sección 10 del prompt: costo unitario CON IVA vigente
+  /// resuelto para este producto al momento del `close` (ver
+  /// `resolveValuationForProducts`) -- NULL cuando el producto no requirió
+  /// valuación (`quantityReal = 0`, ver sección 11 del prompt: "nunca
+  /// inventar costo=0" -- acá NULL significa "no aplicaba", nunca "costo
+  /// cero"). `totalValue = quantityReal * unitCostWithTax`, calculado con
+  /// `Prisma.Decimal` de punta a punta (nunca JS `number`).
+  unitCostWithTax Decimal? @map("unit_cost_with_tax") @db.Decimal(14, 2)
+  totalValue      Decimal? @map("total_value") @db.Decimal(14, 2)
+  /// `PriceValue` EXACTO usado para este cálculo -- referencia congelada:
+  /// aunque después se importe un `PriceValue` con una `effectiveFrom` más
+  /// reciente para la misma `PriceReference`, este puntero (y por lo tanto
+  /// `unitCostWithTax`/`totalValue`) nunca cambia.
+  priceValueId    String?  @map("price_value_id") @db.Uuid
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization            Organization       @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  location                Location           @relation(fields: [organizationId, locationId], references: [organizationId, id], onDelete: Restrict)
+  weeklyClosing           WeeklyClosing      @relation(fields: [organizationId, weeklyClosingId], references: [organizationId, id], onDelete: Restrict)
+  product                 Product            @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  countCorrectionMovement InventoryMovement? @relation(fields: [organizationId, countCorrectionMovementId], references: [organizationId, id], onDelete: Restrict)
+  priceValue              PriceValue?        @relation(fields: [organizationId, priceValueId], references: [organizationId, id], onDelete: Restrict)
+
+  /// Una fila por producto y revisión de un mismo cierre -- reabrir y volver
+  /// a cerrar genera una revisión nueva (sección 12), nunca reescribe la
+  /// anterior.
+  @@unique([organizationId, weeklyClosingId, productId, revision])
+  @@index([organizationId, locationId, productId])
+  @@index([organizationId, countCorrectionMovementId])
+  @@index([organizationId, weeklyClosingId])
+  @@index([organizationId, priceValueId])
+  @@map("inventory_snapshot_item")
+}
+
+/// Presentación física de conteo de un producto (Etapa 6.2.2, secciones
+/// 14/15/16 del prompt: "Unidad/Caja/Pack" observadas en las planillas
+/// reales -- CONFIRMADO que el modelo previo, una única
+/// `unitOfMeasureId`/`unitsPerHandlingUnit` por producto, no puede
+/// representar más de una presentación simultánea sin ambigüedad). Modelo
+/// GENÉRICO y ADITIVO, nunca hardcodeado a esos tres nombres: cualquier
+/// `UnitOfMeasure` ya sembrada (CAJA/LATA/UNIDAD, más las que un ADMIN
+/// agregue) puede ser una presentación de cualquier producto, cada una con
+/// su propio factor de conversión a la cantidad canónica.
+///
+/// Compatibilidad (sección 16): un producto SIN ninguna fila acá sigue
+/// contándose exactamente como antes, con `Product.unitOfMeasureId`/
+/// `unitsPerHandlingUnit` -- no se migró ningún dato existente a esta tabla
+/// nueva ni se generó automáticamente una fila equivalente, porque el
+/// campo `active` de esta tabla determina un camino de validación distinto
+/// en `computeItem` (`apps/api/src/services/inventory-count.ts`): en vez
+/// de generar filas redundantes para los ~200 productos ya sembrados, se
+/// interpreta "sin filas activas" como "seguir usando el campo simple" --
+/// exactamente equivalente y sin escribir nada.
+///
+/// Exclusivo de productos SIN sabor (sección 17 del prompt: "no mezclar el
+/// modelo especial de sabores con las presentaciones de productos
+/// cerrados") -- `createProductCountingPresentation` rechaza un producto
+/// con `flavorId` no nulo; la mecánica Salón/Depósito de Etapa 6.2.1 sigue
+/// siendo la única forma de contar un sabor, sin cambios.
+model ProductCountingPresentation {
+  id             String  @id @default(uuid()) @db.Uuid
+  organizationId String  @map("organization_id") @db.Uuid
+  productId      String  @map("product_id") @db.Uuid
+  /// La unidad de manejo que esta presentación representa (ej. "Caja",
+  /// "Pack", "Unidad") -- reutiliza el catálogo YA sembrado de
+  /// `UnitOfMeasure`, nunca un texto libre nuevo.
+  unitOfMeasureId String @map("unit_of_measure_id") @db.Uuid
+  /// Cuántas unidades CANÓNICAS representa UNA de esta presentación (ej.
+  /// Caja=24, Pack=6, Unidad=1) -- mismo concepto que
+  /// `Product.unitsPerHandlingUnit`, pero por presentación en vez de único
+  /// por producto. CHECK > 0 agregado a mano en la migración.
+  conversionFactorToCanonical Decimal @map("conversion_factor_to_canonical") @db.Decimal(14, 3)
+  active         Boolean @default(true)
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Restrict)
+  /// FKs compuestas -- garantizan que una presentación nunca referencie un
+  /// producto/unidad de OTRA organización (mismo patrón que el resto del
+  /// catálogo desde Etapa 2.1).
+  product       Product       @relation(fields: [organizationId, productId], references: [organizationId, id], onDelete: Restrict)
+  unitOfMeasure UnitOfMeasure @relation(fields: [organizationId, unitOfMeasureId], references: [organizationId, id], onDelete: Restrict)
+
+  /// A lo sumo una presentación por producto y unidad de manejo -- evita
+  /// dos filas ambiguas para "Caja" del mismo producto con factores
+  /// distintos.
+  @@unique([organizationId, productId, unitOfMeasureId])
+  /// Habilita la FK compuesta (organizationId, presentationId) desde
+  /// cualquier consumidor futuro.
+  @@unique([organizationId, id])
+  @@index([organizationId, productId])
+  @@map("product_counting_presentation")
 }

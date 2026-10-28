@@ -80,9 +80,13 @@ export default [
     },
   },
   {
-    // Scripts de CLI (seed, importador de catálogo): console.log es la salida
-    // esperada, no un descuido.
-    files: ['packages/db/src/seed.ts', 'packages/db/src/import-catalog.ts'],
+    // Scripts de CLI (seed, importador de catálogo, alta de usuario de
+    // desarrollo): console.log es la salida esperada, no un descuido.
+    files: [
+      'packages/db/src/seed.ts',
+      'packages/db/src/import-catalog.ts',
+      'apps/api/src/scripts/create-dev-user.ts',
+    ],
     rules: {
       'no-console': 'off',
     },

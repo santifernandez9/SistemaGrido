@@ -60,14 +60,16 @@ export function ResetPasswordPage() {
     setSubmitting(true);
     try {
       await updatePassword(password);
-      // Cierra la sesión de recuperación: el usuario vuelve a /login e
-      // inicia sesión explícitamente con la contraseña nueva (sección 5 del
-      // prompt), en vez de quedar logueado automáticamente por el enlace.
-      try {
-        await signOut();
-      } catch {
-        // La contraseña ya se guardó -- este signOut es sólo limpieza.
-      }
+      // La contraseña YA quedó guardada en Supabase acá -- lo que sigue es
+      // sólo limpieza de la sesión de recuperación, nunca debe demorar ni
+      // bloquear la confirmación al usuario. `signOut()` llama al backend
+      // (Render) para registrar el logout, que en el plan free puede tardar
+      // bastante en responder si estaba dormido -- si el usuario tuviera
+      // que esperar eso acá, la pantalla parecería "colgada" aunque el
+      // cambio real ya se hizo. Se dispara sin esperar (fire-and-forget);
+      // si falla, no importa -- la sesión de recuperación igual expira sola
+      // y el usuario va a iniciar sesión de nuevo con la contraseña nueva.
+      void signOut().catch(() => {});
       setDone(true);
     } catch {
       setError(UPDATE_ERROR_MESSAGE);

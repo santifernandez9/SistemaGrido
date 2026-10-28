@@ -80,6 +80,35 @@ describe('/api/products, /api/product-types, /api/units-of-measure', () => {
     };
   }
 
+  describe('lectura (Etapa 4: la app heladería necesita leer el catálogo)', () => {
+    it('SHOP_EMPLOYEE puede LEER el catálogo de productos, aunque no pueda gestionarlo', async () => {
+      const created = await app.inject({
+        method: 'POST',
+        url: '/api/products',
+        headers: adminAuthHeader,
+        payload: validPayload(),
+      });
+
+      mockGetUser({
+        data: { user: { id: 'sub-empleada-prod', email: 'empleada-prod@test.com' } },
+        error: null,
+      });
+      const list = await app.inject({
+        method: 'GET',
+        url: '/api/products',
+        headers: employeeAuthHeader,
+      });
+      expect(list.statusCode).toBe(200);
+
+      const detail = await app.inject({
+        method: 'GET',
+        url: `/api/products/${created.json().data.id}`,
+        headers: employeeAuthHeader,
+      });
+      expect(detail.statusCode).toBe(200);
+    });
+  });
+
   describe('creación', () => {
     it('un rol SHOP_EMPLOYEE no puede crear productos (403)', async () => {
       mockGetUser({
